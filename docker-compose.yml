@@ -1,0 +1,28 @@
+services:
+  vaultbook:
+    build: .
+    image: vaultbook:latest
+    container_name: vaultbook
+    ports:
+      - "3000:3000"
+    environment:
+      # 闲置多久自动锁定（分钟）
+      - VAULT_AUTO_LOCK_MINUTES=30
+      # 解锁连续失败多少次后临时封禁
+      - VAULT_UNLOCK_MAX_ATTEMPTS=5
+      # 封禁时长（秒）
+      - VAULT_UNLOCK_LOCKOUT_SECONDS=60
+      # 单个附件大小上限（MB）
+      - VAULT_ATTACH_MAX_MB=20
+      # 部署在 HTTPS 反向代理后面时设为 true：
+      #  - Cookie 加 Secure 标志（只在 HTTPS 下传输）
+      #  - 启用 HSTS（强制浏览器走 HTTPS）
+      #  - 必须配合 VAULT_TRUST_PROXY=true，否则限流看到的都是代理 IP
+      - VAULT_HTTPS=false
+      - VAULT_TRUST_PROXY=false
+    volumes:
+      - vault-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  vault-data:

@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#6366f1">
+  <title>Keystone</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='11' width='16' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ======== 首次初始化 ======== -->
+  <section id="view-setup" class="view auth-view hidden">
+    <form id="setup-form" class="auth-card" autocomplete="off">
+      <div class="auth-logo"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+      <h1>创建你的 Keystone</h1>
+      <p class="auth-sub">设置一个主密码，它将加密所有数据。<br>主密码无法找回，请务必牢记！</p>
+      <label class="field">
+        <span>主密码</span>
+        <input type="password" id="setup-pw" placeholder="至少 8 位" maxlength="200" required>
+      </label>
+      <div class="strength hidden" id="setup-strength">
+        <div class="strength-bar"><i id="setup-strength-fill"></i></div>
+        <span id="setup-strength-label"></span>
+      </div>
+      <label class="field">
+        <span>确认主密码</span>
+        <input type="password" id="setup-pw2" placeholder="再输入一次" maxlength="200" required>
+      </label>
+      <button type="submit" class="btn primary block">创建 Keystone</button>
+      <button type="button" class="btn ghost block" id="setup-restore-btn">已有备份？从备份恢复</button>
+      <p class="auth-hint">🔒 数据仅加密存储在本地服务器，重启服务后自动锁定</p>
+    </form>
+  </section>
+
+  <!-- ======== 锁定界面 ======== -->
+  <section id="view-lock" class="view auth-view hidden">
+    <form id="lock-form" class="auth-card" autocomplete="off">
+      <div class="auth-logo"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+      <h1>Keystone 已锁定</h1>
+      <p class="auth-sub">输入主密码解锁</p>
+      <label class="field">
+        <span>主密码</span>
+        <input type="password" id="lock-pw" placeholder="请输入主密码" maxlength="200" required autofocus>
+      </label>
+      <label class="field hidden" id="lock-totp-wrap">
+        <span>两步验证码</span>
+        <input type="text" id="lock-totp" placeholder="6 位验证码或恢复码" maxlength="24" autocomplete="one-time-code">
+      </label>
+      <p class="auth-error hidden" id="lock-error"></p>
+      <button type="submit" class="btn primary block" id="lock-btn">解锁</button>
+      <p class="auth-hint">🔒 主密码仅保存在你的记忆中，丢失将无法恢复数据</p>
+    </form>
+  </section>
+
+  <!-- ======== 主界面 ======== -->
+  <section id="view-main" class="view hidden">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span>
+        <span class="brand-name">Keystone</span>
+      </div>
+      <div class="search">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="search" placeholder="搜索名称、账号、备注…" maxlength="100">
+        <button type="button" id="search-clear" class="search-clear hidden" title="清空搜索">✕</button>
+      </div>
+      <div class="actions">
+        <button id="export-btn" class="icon-btn" title="导出加密备份">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </button>
+        <button id="import-btn" class="icon-btn" title="导入备份">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </button>
+        <button id="settings-btn" class="icon-btn" title="设置">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button id="theme-btn" class="icon-btn" title="切换主题"></button>
+        <button id="lock-now-btn" class="icon-btn" title="立即锁定">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+        </button>
+        <button id="batch-btn" class="btn ghost sm">批量操作</button>
+        <button id="add-btn" class="btn primary">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          新增
+        </button>
+      </div>
+    </header>
+
+    <div class="chips-row">
+      <nav class="chips" id="chips"></nav>
+      <select id="sort-select" class="sort-select" title="排序方式">
+        <option value="updated">最近更新</option>
+        <option value="name">名称</option>
+        <option value="created">创建时间</option>
+      </select>
+    </div>
+
+    <main class="grid" id="grid"></main>
+
+    <div class="empty hidden" id="empty">
+      <div class="empty-icon">🔐</div>
+      <h2 id="empty-title">还没有任何条目</h2>
+      <p id="empty-text">点击右上角「新增」，开始记录你的第一个账号密码</p>
+    </div>
+  </section>
+
+  <!-- ======== 批量操作栏 ======== -->
+  <div id="batch-bar" class="batch-bar hidden">
+    <span id="batch-count">已选 0 项</span>
+    <button class="btn ghost sm" id="batch-all">全选</button>
+    <div id="batch-cat-wrap" class="hidden">
+      <select id="batch-cat-select"></select>
+      <button class="btn ghost sm" id="batch-cat-ok">确定</button>
+      <button class="btn ghost sm" id="batch-cat-cancel">取消</button>
+    </div>
+    <button class="btn ghost sm" id="batch-cat-btn">改分类</button>
+    <button class="btn ghost sm" id="batch-export-btn">导出所选</button>
+    <button class="btn danger sm" id="batch-delete-btn">删除</button>
+  </div>
+
+  <!-- ======== 新增/编辑弹窗 ======== -->
+  <div class="modal hidden" id="modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="modal-title">新增条目</h2>
+        <button class="icon-btn" id="modal-close" title="关闭">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="entry-form" autocomplete="off">
+        <div class="form-grid">
+          <label class="field span2">
+            <span>名称 *</span>
+            <input type="text" id="m-title" placeholder="例如：微信、招行储蓄卡" maxlength="60" required>
+          </label>
+          <label class="field span2">
+            <span>副标题（可选，显示在卡片标题下方）</span>
+            <input type="text" id="m-subtitle" placeholder="如：工作用 / 家庭用 / 主卡" maxlength="120">
+          </label>
+          <div class="field span2">
+            <span>图标（可选，上传图片显示在卡片名称前；不设置则显示文字）</span>
+            <div class="icon-picker">
+              <div class="icon-preview" id="icon-preview">🔤</div>
+              <button type="button" class="btn ghost sm" id="icon-upload-btn">上传图片</button>
+              <button type="button" class="btn ghost sm" id="icon-remove-btn">移除</button>
+            </div>
+          </div>
+          <label class="field span2">
+            <span>分类 *</span>
+            <select id="m-cat"></select>
+            <div class="cat-empty-hint hidden" id="m-cat-empty">
+              <span class="cat-empty-text">暂无分类</span>
+              <button type="button" class="btn primary sm" id="m-cat-empty-btn">去创建</button>
+            </div>
+          </label>
+          <div class="span2 fields-section">
+            <div class="fields-head">
+              <span class="fields-title">📝 字段 · 📌 置顶到卡片 · ⧉ 卡片复制按钮</span>
+              <div class="fields-head-btns">
+                <button type="button" class="btn ghost sm" id="fields-divider-btn">— 分割线</button>
+                <button type="button" class="btn ghost sm" id="fields-add-btn">＋ 添加字段</button>
+              </div>
+            </div>
+            <div id="fields-list"></div>
+          </div>
+        </div>
+        <div class="span2 attach-section" id="attach-section">
+          <div class="attach-head">
+            <span class="attach-title">📎 附件</span>
+            <button type="button" class="btn ghost sm" id="attach-add-btn">＋ 添加附件</button>
+          </div>
+          <div id="attach-list"></div>
+          <p class="attach-hint">附件以加密形式存储在服务器，仅本应用可下载；单文件上限 20MB</p>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" id="modal-cancel">取消</button>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ======== 设置弹窗（两步验证） ======== -->
+  <div class="modal hidden" id="settings-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>设置</h2>
+        <button class="icon-btn" id="settings-close" title="关闭">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="settings-body">
+        <!-- 设置菜单 -->
+        <div id="settings-menu">
+          <button class="settings-row" data-open="cats">🏷️ 分类管理</button>
+          <button class="settings-row" data-open="autolock">⏰ 自动锁定</button>
+          <button class="settings-row" data-open="backup">💾 备份与恢复</button>
+          <button class="settings-row" data-open="password">🔑 修改主密码</button>
+          <button class="settings-row" data-open="totp">🔐 两步验证（TOTP）</button>
+          <button class="settings-row" data-open="about">ℹ️ 关于</button>
+        </div>
+
+        <!-- 分类管理 -->
+        <div class="settings-section hidden" id="settings-cats">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card">
+            <h3>🏷️ 分类管理</h3>
+            <p class="settings-desc">分类完全由你创建和管理，用来整理条目。</p>
+            <div id="cat-count-line"></div>
+            <div id="cat-chips"></div>
+            <div class="input-actions">
+              <input type="text" id="cat-new" placeholder="输入新分类名称，如：游戏账号" maxlength="20">
+              <button class="btn ghost" id="cat-add-btn">添加分类</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 自动锁定 -->
+        <div class="settings-section hidden" id="settings-autolock">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card">
+            <h3>⏱ 自动锁定</h3>
+            <p class="settings-desc">闲置超过设定时间后自动锁定 Keystone，需要重新输入主密码（和两步验证码）才能使用。</p>
+            <label class="field">
+              <span>闲置多少分钟后自动锁定</span>
+              <select id="autolock-select">
+                <option value="1">1 分钟</option>
+                <option value="5">5 分钟</option>
+                <option value="10">10 分钟</option>
+                <option value="15">15 分钟</option>
+                <option value="30">30 分钟</option>
+                <option value="60">60 分钟</option>
+                <option value="120">2 小时</option>
+                <option value="240">4 小时</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <!-- 关于 -->
+        <div class="settings-section hidden" id="settings-about">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card about-card">
+            <div class="about-logo"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+            <h3 class="about-name">Keystone</h3>
+            <p class="about-version">版本 1.0.0</p>
+            <div class="about-stats" id="about-stats">
+              <div class="stat"><b>0</b><span>条目</span></div>
+              <div class="stat"><b>0</b><span>分类</span></div>
+              <div class="stat"><b>0</b><span>附件</span></div>
+            </div>
+            <p class="settings-desc about-desc">极简、私密的个人密码管理器。自托管、零知识加密，所有数据都掌握在你自己手里。</p>
+            <div class="about-info">
+              <p>🔒 所有数据加密存储（AES-256-GCM），服务端只保存密文，即使数据文件泄露也无法读取</p>
+              <p>🔑 主密码通过 scrypt 派生密钥，仅存在于内存，重启服务后自动回到锁定状态</p>
+              <p>⏱ 闲置自动锁定，随时可手动锁定，防止他人使用</p>
+              <p>📦 支持自定义字段、附件、分类管理、加密备份导出/导入、两步验证解锁</p>
+              <p>💾 数据文件：vault.json（可连同 attachments 目录整体备份）</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 备份与恢复 -->
+        <div class="settings-section hidden" id="settings-backup">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card">
+            <h3>💾 备份与恢复</h3>
+            <p class="settings-desc">备份包含全部条目、附件和两步验证配置（不含主密码）。恢复后请用<b>备份对应的主密码</b>解锁。</p>
+            <div class="backup-actions">
+              <button class="btn primary" id="backup-export-btn">导出加密备份</button>
+              <button class="btn ghost" id="backup-import-btn">导入备份</button>
+            </div>
+            <div class="about-info backup-tips">
+              <p>📤 导出：下载单个备份文件，可存到 U 盘/网盘，附件也包含在内</p>
+              <p>📥 导入：会覆盖当前全部数据（有确认提示）；全新部署时在创建界面点「已有备份？从备份恢复」</p>
+              <p>💡 顶栏的「导出/导入」图标与这里的按钮功能相同</p>
+              <p>🔄 服务端每天自动备份数据到 data/backups/ 目录，保留最近 7 份</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 修改主密码 -->
+        <div class="settings-section hidden" id="settings-password">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card">
+            <h3>🔑 修改主密码</h3>
+            <p class="settings-desc">修改后所有数据会用新主密码重新加密（含附件）。新密码请务必牢记，无法找回。</p>
+            <label class="field">
+              <span>当前主密码</span>
+              <input type="password" id="pw-old" placeholder="当前主密码" maxlength="200" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>新主密码（至少 8 位）</span>
+              <input type="password" id="pw-new" placeholder="新主密码" maxlength="200" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>确认新主密码</span>
+              <input type="password" id="pw-new2" placeholder="再输入一次" maxlength="200" autocomplete="off">
+            </label>
+            <button class="btn danger" id="pw-change-btn">修改主密码</button>
+          </div>
+        </div>
+
+        <!-- 两步验证 -->
+        <div class="settings-section hidden" id="settings-totp">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card">
+            <h3>🔐 两步验证（TOTP）</h3>
+            <p class="settings-desc">开启后，解锁除了主密码还需要输入身份验证器 App（Google Authenticator、Microsoft Authenticator 等）中的动态验证码。即使主密码泄露，没有验证器也无法解锁。</p>
+
+            <div id="totp-actions">
+              <button class="btn primary" id="totp-enable-btn">开启两步验证</button>
+              <div id="totp-on" class="hidden">
+                <p class="totp-status-ok">✅ 两步验证已开启</p>
+                <label class="field">
+                  <span>输入主密码确认关闭</span>
+                  <input type="password" id="totp-disable-pw" placeholder="主密码" maxlength="200" autocomplete="off">
+                </label>
+                <button class="btn danger" id="totp-disable-btn">关闭两步验证</button>
+                <button class="btn ghost" id="recovery-regen-btn">重新生成恢复码</button>
+              </div>
+            </div>
+
+            <div id="totp-wizard" class="hidden">
+              <p class="settings-step">① 用身份验证器 App（Google Authenticator 等）扫描二维码：</p>
+              <div class="qr-box">
+                <img id="totp-qr" alt="两步验证二维码">
+              </div>
+              <details class="qr-manual">
+                <summary>无法扫码？手动输入密钥</summary>
+                <div class="secret-box">
+                  <code id="totp-secret"></code>
+                  <button type="button" class="icon-btn sm" id="totp-secret-copy" title="复制密钥">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  </button>
+                </div>
+              </details>
+              <p class="settings-step">② 输入 App 中显示的 6 位验证码完成验证：</p>
+              <div class="input-actions">
+                <input type="text" id="totp-code" placeholder="6 位验证码" maxlength="12" inputmode="numeric">
+                <button class="btn primary" id="totp-confirm-btn">验证并启用</button>
+              </div>
+            </div>
+
+            <div id="recovery-box" class="hidden">
+              <div class="recovery-warn">⚠️ 恢复码用于丢失验证器 App 时解锁。<b>请立即保存到安全的地方</b>，每个只能使用一次，关闭本窗口后将不再显示！</div>
+              <div class="recovery-codes" id="recovery-list"></div>
+              <button class="btn ghost block" id="recovery-done-btn">我已保存恢复码</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======== 附件预览弹窗 ======== -->
+  <div class="modal hidden" id="preview-modal">
+    <div class="modal-card preview-card">
+      <div class="modal-head">
+        <h2 id="preview-name" title=""></h2>
+        <div class="preview-actions">
+          <span id="preview-size"></span>
+          <button class="icon-btn" id="preview-dl" title="下载">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </button>
+          <button class="icon-btn" id="preview-close" title="关闭">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="preview-body" class="preview-body"></div>
+    </div>
+  </div>
+
+  <input type="file" id="import-file" accept=".json,application/json" class="hidden">
+  <input type="file" id="icon-file" accept="image/*" class="hidden">
+  <input type="file" id="attach-file" class="hidden" multiple>
+
+  <div id="toast"></div>
+
+  <script src="vendor/qrcode.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

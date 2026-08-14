@@ -1,0 +1,19 @@
+# 依赖与运行数据
+node_modules/
+data/
+*.log
+.npm-cache/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 测试临时产物
+tests/backup-test.json
+tests/backup-test.json.secret
+tests/icon-test.json
+shots/
+
+# 编辑器/IDE
+.vscode/
+.idea/

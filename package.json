@@ -1,0 +1,18 @@
+{
+  "name": "keystone",
+  "version": "1.0.0",
+  "description": "Keystone - 极简个人密码管理器，Docker 一键部署，零知识加密",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node tests/flow.mjs",
+    "test:ui": "node tests/ui-test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.2.0"
+  }
+}
