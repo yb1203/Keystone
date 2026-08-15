@@ -34,6 +34,24 @@
 
 ## 🚀 快速开始（Docker 部署）
 
+### 在线命令部署（Linux 服务器）
+
+服务器已安装并启动 Docker、Docker Compose v2 与 Git 后，在准备部署的目录执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yb1203/Keystone/main/scripts/install.sh | bash
+```
+
+脚本会克隆项目到当前目录的 `keystone/`，构建并启动服务。访问 `http://服务器IP:3000` 完成首次初始化。需要指定目录时：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yb1203/Keystone/main/scripts/install.sh | KEYSTONE_INSTALL_DIR=/srv/keystone bash
+```
+
+再次执行同一条命令即可拉取最新代码并更新容器；脚本发现未提交的本地改动时会停止，不会覆盖它们。
+
+### 手动部署
+
 ```bash
 # 1. 构建并启动（在项目目录下）
 docker compose up -d --build
@@ -130,6 +148,8 @@ npm run test:static       # 前端静态检查与运行时初始化检查
 │   ├── styles.css
 │   ├── app.js
 │   └── vendor/qrcode.js # 二维码生成库（本地生成，密钥不出浏览器）
+├── scripts/
+│   └── install.sh        # Linux 在线部署与更新脚本
 └── tests/               # 自动化测试
 ```
 
