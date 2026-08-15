@@ -55,12 +55,7 @@ services:
       VAULT_BACKUP_KEEP: "7"
       VAULT_HTTPS: "false"
       VAULT_TRUST_PROXY: "false"
-    volumes:
-      - vault-data:/app/data
     restart: unless-stopped
-
-volumes:
-  vault-data:
 ```
 
 启动后访问 `http://服务器IP:3000`。若端口已被占用，将 `"3000:3000"` 改成 `"3001:3000"`。同一份配置也保存在 [docker-compose.yml](docker-compose.yml)。
@@ -94,7 +89,7 @@ docker compose up -d --build --remove-orphans
 #    ⚠️ 主密码无法找回，务必牢记！忘记 = 数据永久丢失
 ```
 
-数据保存在 Docker 卷 `vault-data` 中（`/app/data/`），容器删了数据也还在。
+数据保存在容器内的 `/app/data/`。正常重启容器不会丢失；删除容器后数据会一并清空，重新部署将进入首次初始化。请在删除容器前导出加密备份。
 
 默认可通过 HTTP 在本机或可信内网使用。**公网访问必须加 HTTPS**：用 Caddy / Nginx 反代到 3000 端口，并设置环境变量 `VAULT_HTTPS=true`、`VAULT_TRUST_PROXY=true`。
 

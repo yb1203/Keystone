@@ -21,9 +21,4 @@ services:
       #  - 必须配合 VAULT_TRUST_PROXY=true，否则限流看到的都是代理 IP
       - VAULT_HTTPS=false
       - VAULT_TRUST_PROXY=false
-    volumes:
-      - vault-data:/app/data
     restart: unless-stopped
-
-volumes:
-  vault-data:

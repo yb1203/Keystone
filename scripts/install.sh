@@ -39,4 +39,4 @@ docker compose up -d --build --remove-orphans
 
 printf '\n[Keystone] Deployment complete.\n'
 printf '[Keystone] Open: http://SERVER_IP:3000\n'
-printf '[Keystone] Data is stored in the Docker volume: vault-data\n'
+printf '[Keystone] Data is stored inside the container; deleting the container clears the vault.\n'
