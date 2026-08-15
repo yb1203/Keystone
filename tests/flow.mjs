@@ -239,6 +239,11 @@ check('导出包含图标', (exported.entries.find((x) => x.id === e1.id).icon |
 r = await req('/api/import', { method: 'POST', body: JSON.stringify(exported) }, cookie);
 check('导入成功', r.status === 200 && r.data.ok);
 check('导入响应含附件缺失数', typeof r.data.missingAttachments === 'number');
+if (process.env.DATA_DIR) {
+  const { readFileSync } = await import('node:fs');
+  const saved = JSON.parse(readFileSync(`${process.env.DATA_DIR}/vault.json`, 'utf8'));
+  check('导入后主数据不内嵌附件', !Object.hasOwn(saved, 'attachments'));
+}
 check('导入后需重新解锁(401)', (await req('/api/entries', {}, cookie)).status === 401);
 
 // 重新解锁，为后续用例建立有效会话
@@ -460,9 +465,14 @@ console.log('— 修改主密码（全量重加密） —');
 // 旧密码错误被拒
 r = await req('/api/password', { method: 'POST', body: JSON.stringify({ oldPassword: 'WrongOld1', newPassword: 'NewPass@2024!' }) }, cookie);
 check('旧密码错误被拒(400)', r.status === 400);
+// 模拟另一个已打开的标签页，改密后它必须失效，不能再用旧密钥写入。
+const otherSession = await req('/api/unlock', { method: 'POST', body: JSON.stringify({ password: 'MyTest@2024Pass' }) });
+check('创建第二个会话', otherSession.status === 200 && !!otherSession.vsid);
 // 修改成功
 r = await req('/api/password', { method: 'POST', body: JSON.stringify({ oldPassword: 'MyTest@2024Pass', newPassword: 'NewPass@2024!' }) }, cookie);
-check('修改主密码成功', r.status === 200 && r.data.ok);
+check('修改主密码成功', r.status === 200 && r.data.ok && !!r.vsid);
+cookie = r.vsid;
+check('改密后旧会话失效', (await req('/api/entries', {}, otherSession.vsid)).status === 401);
 // 当前会话无缝继续
 r = await req('/api/entries', {}, cookie);
 check('修改后当前会话仍可用', r.status === 200);

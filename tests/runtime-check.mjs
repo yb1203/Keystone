@@ -1,5 +1,9 @@
 // 运行时体检：用最小 DOM 桩加载 app.js，捕获初始化阶段的第一处真实报错
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const el = () => ({
   classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
@@ -33,7 +37,7 @@ process.on('unhandledRejection', (err) => {
 
 try {
   // 模拟 <script src="app.js"> 直接执行
-  eval(readFileSync('E:/密码本/public/app.js', 'utf8'));
+  eval(readFileSync(join(ROOT, 'public', 'app.js'), 'utf8'));
   setTimeout(() => { console.log('app.js 加载与初始化无异常'); process.exit(0); }, 500);
 } catch (e) {
   console.log('!!! 加载异常:', e.stack ? e.stack.split('\n').slice(0, 4).join('\n') : e.message);

@@ -37,8 +37,6 @@ const MAX_ATTACH_BYTES = (Number(process.env.VAULT_ATTACH_MAX_MB) || 20) * 1024 
 
 // HTTPS 部署模式：开启后 Cookie 加 Secure 标志并启用 HSTS（必须走 TLS 反向代理）
 const SECURE_MODE = process.env.VAULT_HTTPS === 'true';
-// 部署在反向代理后面时开启，解锁限流才能看到真实客户端 IP
-if (process.env.VAULT_TRUST_PROXY === 'true') app.set('trust proxy', 1);
 
 // 附件上传：内存暂存（上限 20MB），文件名由服务端 UUID 生成，杜绝路径穿越
 const upload = multer({
@@ -49,6 +47,8 @@ const upload = multer({
 // ---------------- 基础 ----------------
 const app = express();
 app.disable('x-powered-by');
+// 部署在反向代理后面时开启，解锁限流才能看到真实客户端 IP
+if (process.env.VAULT_TRUST_PROXY === 'true') app.set('trust proxy', 1);
 app.use(express.json({ limit: '200mb' })); // 备份可能内嵌附件(base64)，放宽体积限制
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -75,6 +75,7 @@ const TOTP_PENDING_TTL_MS = 10 * 60 * 1000;
 // 新增条目时的待绑定附件：sessionId -> { expires, items: Map(attId -> att) }（先上传，保存条目时绑定）
 const pendingAtts = new Map();
 const PENDING_ATT_TTL_MS = 30 * 60 * 1000;
+let vaultMaintenance = false;
 
 // ---------------- 会话工具 ----------------
 function parseCookies(req) {
@@ -83,7 +84,10 @@ function parseCookies(req) {
   if (!h) return out;
   for (const part of h.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    try {
+      out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    } catch { /* 畸形 Cookie 视为无效，不影响其他请求 */ }
   }
   return out;
 }
@@ -94,7 +98,7 @@ function currentAutoLockMs() {
   return (Number.isFinite(m) && m >= 1 && m <= 240 ? m : Number(process.env.VAULT_AUTO_LOCK_MINUTES) || 30) * 60_000;
 }
 
-function getSession(req) {
+function getSession(req, touch = true) {
   const sid = parseCookies(req).vsid;
   if (!sid) return null;
   const s = sessions.get(sid);
@@ -103,7 +107,7 @@ function getSession(req) {
     sessions.delete(sid); // 闲置超时自动锁定
     return null;
   }
-  s.lastActive = Date.now(); // 滑动续期
+  if (touch) s.lastActive = Date.now(); // 真实操作才滑动续期
   return { sid, key: s.key };
 }
 
@@ -117,6 +121,22 @@ function auth(req, res, next) {
 
 /** 异步路由包装：异常统一交给错误中间件 */
 const h = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+const withVaultMaintenance = (fn) => h(async (req, res, next) => {
+  if (vaultMaintenance) return res.status(409).json({ error: '密码库正在执行重要操作，请稍后再试' });
+  vaultMaintenance = true;
+  try {
+    return await fn(req, res, next);
+  } finally {
+    vaultMaintenance = false;
+  }
+});
+
+app.use('/api', (req, res, next) => {
+  if (vaultMaintenance && !['/health', '/state', '/lock'].includes(req.path)) {
+    return res.status(409).json({ error: '密码库正在执行重要操作，请稍后再试' });
+  }
+  next();
+});
 
 // 定期清理过期会话、限流记录、TOTP 待确认状态与待绑定附件
 setInterval(() => {
@@ -283,18 +303,18 @@ function findAttachment(attId) {
 }
 
 /** 加密附件内容：header(iv 12B + tag 16B) + 密文 */
-async function writeAttachment(key, attId, data) {
+async function writeAttachment(key, attId, data, suffix = '') {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ct = Buffer.concat([cipher.update(data), cipher.final()]);
   const tag = cipher.getAuthTag();
   await fs.mkdir(ATTACH_DIR, { recursive: true });
-  await fs.writeFile(path.join(ATTACH_DIR, attId + '.bin'), Buffer.concat([iv, tag, ct]));
+  await fs.writeFile(attachmentPath(attId, suffix), Buffer.concat([iv, tag, ct]));
 }
 
 /** 解密读取附件内容；文件损坏时抛出异常 */
 async function readAttachment(key, attId) {
-  const buf = await fs.readFile(path.join(ATTACH_DIR, attId + '.bin'));
+  const buf = await fs.readFile(attachmentPath(attId));
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const ct = buf.subarray(28);
@@ -305,7 +325,7 @@ async function readAttachment(key, attId) {
 
 /** 删除附件文件（尽力而为，文件不存在不报错） */
 async function removeAttachmentFile(attId) {
-  try { await fs.unlink(path.join(ATTACH_DIR, attId + '.bin')); } catch { /* 忽略 */ }
+  try { await fs.unlink(attachmentPath(attId)); } catch { /* 忽略 */ }
 }
 
 /** 启动时清理孤儿附件：磁盘上有但任何条目都不引用的加密文件 */
@@ -331,7 +351,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true, uptime: process.uptime
 app.get('/api/state', (req, res) => {
   res.json({
     setup: !!store.data.kdf,
-    unlocked: !!getSession(req),
+    unlocked: !!getSession(req, false),
     autoLockMinutes: currentAutoLockMs() / 60_000,
     totpEnabled: !!totpEnabled(),
   });
@@ -513,9 +533,10 @@ app.post('/api/recovery/regenerate', auth, h(async (req, res) => {
 
 // ---------------- 修改主密码 ----------------
 
-/** 用新密钥重加密一个条目（兼容旧版对象格式字段，顺带升级为新格式） */
+/** 用新密钥重加密一个条目（兼容旧版对象格式字段，返回新对象而不修改原数据） */
 function reencryptEntry(entry, oldKey, newKey) {
-  let title = entry.title ? decrypt(oldKey, entry.title) : decrypt(oldKey, entry.fields?.title);
+  const next = structuredClone(entry);
+  const title = entry.title ? decrypt(oldKey, entry.title) : decrypt(oldKey, entry.fields?.title);
   const fields = [];
   if (Array.isArray(entry.fields)) {
     for (const f of entry.fields) {
@@ -538,19 +559,38 @@ function reencryptEntry(entry, oldKey, newKey) {
       if (blob) fields.push({ name, type, value: decrypt(oldKey, blob), pinned: false, copyable: true });
     }
   }
-  entry.title = encrypt(newKey, title);
-  if (entry.subtitle) entry.subtitle = encrypt(newKey, decrypt(oldKey, entry.subtitle));
-  entry.fields = fields.map((f) => ({
+  next.title = encrypt(newKey, title);
+  if (entry.subtitle) next.subtitle = encrypt(newKey, decrypt(oldKey, entry.subtitle));
+  else delete next.subtitle;
+  next.fields = fields.map((f) => ({
     n: encrypt(newKey, f.name),
     t: encrypt(newKey, f.type),
     v: encrypt(newKey, f.value),
     p: encrypt(newKey, f.pinned ? '1' : '0'),
     c: encrypt(newKey, f.copyable === false ? '0' : '1'),
   }));
+  return next;
+}
+
+function attachmentPath(attId, suffix = '') {
+  return path.join(ATTACH_DIR, `${attId}.bin${suffix}`);
+}
+
+async function removeFiles(paths) {
+  await Promise.all(paths.map((p) => fs.unlink(p).catch(() => {})));
+}
+
+async function clearPendingAttachments() {
+  const files = [];
+  for (const pending of pendingAtts.values()) {
+    for (const att of pending.items.values()) files.push(attachmentPath(att.id));
+  }
+  pendingAtts.clear();
+  await removeFiles(files);
 }
 
 /** 修改主密码：验证旧密码 → 派生新密钥 → 全量重加密（条目/附件/两步验证） */
-app.post('/api/password', auth, h(async (req, res) => {
+app.post('/api/password', auth, withVaultMaintenance(async (req, res) => {
   const oldPw = String(req.body?.oldPassword ?? '');
   const newPw = String(req.body?.newPassword ?? '');
   if (newPw.length < 8) return res.status(400).json({ error: '新主密码至少需要 8 位' });
@@ -561,53 +601,75 @@ app.post('/api/password', auth, h(async (req, res) => {
     return res.status(400).json({ error: '旧主密码错误' });
   }
   const oldKey = req.session.key;
-
-  // 预检：所有条目必须能完整解密，避免重加密中途失败导致数据不一致
-  for (const entry of store.data.entries) {
-    try {
-      reencryptEntry(entry, oldKey, oldKey); // 用旧密钥"重加密"＝只读校验（顺带升级旧格式）
-    } catch {
-      return res.status(500).json({ error: '数据异常（存在损坏条目），无法修改主密码' });
-    }
-  }
-
-  // 派生新密钥（新盐）
   const salt = crypto.randomBytes(16);
   const newKey = await deriveKey(newPw, salt);
 
-  // 重加密所有条目（含旧版格式自动升级）
-  for (const entry of store.data.entries) reencryptEntry(entry, oldKey, newKey);
-
-  // 重加密附件文件（含待绑定附件）
-  const reencryptFile = async (id) => {
-    try {
-      const plain = await readAttachment(oldKey, id);
-      await writeAttachment(newKey, id, plain);
-    } catch { /* 文件缺失/损坏则跳过 */ }
-  };
-  for (const entry of store.data.entries) {
-    for (const att of entry.attachments || []) await reencryptFile(att.id);
+  // 全部先在内存中生成新数据；任一密文损坏都不会改动当前库。
+  let nextData;
+  try {
+    nextData = structuredClone(store.data);
+    nextData.entries = store.data.entries.map((entry) => reencryptEntry(entry, oldKey, newKey));
+    if (store.data.security?.totp?.secret) {
+      nextData.security.totp.secret = encrypt(newKey, decrypt(oldKey, store.data.security.totp.secret));
+    }
+  } catch {
+    return res.status(500).json({ error: '数据异常（存在无法解密的条目或两步验证信息），无法修改主密码' });
   }
-  for (const [, p] of pendingAtts) {
-    for (const att of p.items.values()) await reencryptFile(att.id);
-  }
-
-  // 重加密两步验证密钥
-  if (store.data.security?.totp?.secret) {
-    store.data.security.totp.secret = encrypt(newKey, decrypt(oldKey, store.data.security.totp.secret));
-  }
-
-  // 更换盐与验证令牌
+  // 旧版本导入可能遗留内嵌附件密文；真实附件以 attachments 目录为准。
+  delete nextData.attachments;
   const token = crypto.randomBytes(32);
-  store.data.kdf = { salt: salt.toString('base64'), verifier: encrypt(newKey, token), createdAt: Date.now() };
-  await store.save();
+  nextData.kdf = { salt: salt.toString('base64'), verifier: encrypt(newKey, token), createdAt: Date.now() };
 
-  // 当前会话无缝切换到新密钥（无需重新解锁）
-  const s = sessions.get(req.session.sid);
-  if (s) s.key = newKey;
-  req.session.key = newKey;
+  const ids = [...new Set(store.data.entries.flatMap((entry) =>
+    (entry.attachments || []).map((att) => att.id)))];
+  const tx = `.rekey-${crypto.randomUUID()}`;
+  const staged = ids.map((id) => attachmentPath(id, `${tx}.next`));
+  const previous = ids.map((id) => attachmentPath(id, `${tx}.old`));
+  const promoted = [];
 
-  res.json({ ok: true, message: '主密码已修改' });
+  try {
+    // 先写入独立临时文件。任一附件缺失或损坏都会中止，原文件保持不动。
+    for (const id of ids) {
+      const plain = await readAttachment(oldKey, id);
+      await writeAttachment(newKey, id, plain, `${tx}.next`);
+    }
+
+    // 文件切换失败时立即回滚，避免主数据与附件使用不同密钥。
+    for (const id of ids) {
+      const current = attachmentPath(id);
+      const next = attachmentPath(id, `${tx}.next`);
+      const old = attachmentPath(id, `${tx}.old`);
+      await fs.rename(current, old);
+      try {
+        await fs.rename(next, current);
+        promoted.push(id);
+      } catch (err) {
+        await fs.rename(old, current).catch(() => {});
+        throw err;
+      }
+    }
+    await store.replace(nextData);
+  } catch (err) {
+    for (const id of promoted.reverse()) {
+      const current = attachmentPath(id);
+      const old = attachmentPath(id, `${tx}.old`);
+      await fs.unlink(current).catch(() => {});
+      await fs.rename(old, current).catch(() => {});
+    }
+    await removeFiles(staged.concat(previous));
+    console.error('[password] 主密码修改失败:', err.message);
+    return res.status(500).json({ error: '修改主密码失败，数据未变更' });
+  }
+  await removeFiles(previous);
+
+  // 新密钥只交给新的会话；旧标签页和设备不能再用旧密钥写入数据。
+  sessions.clear();
+  totpPending.clear();
+  await clearPendingAttachments();
+  const sid = crypto.randomBytes(24).toString('base64url');
+  sessions.set(sid, { key: newKey, lastActive: Date.now() });
+  res.cookie('vsid', sid, { httpOnly: true, sameSite: 'strict', path: '/', secure: SECURE_MODE });
+  res.json({ ok: true, message: '主密码已修改，其他会话已锁定' });
 }));
 
 /** 读取全部条目（服务端解密后返回） */
@@ -618,7 +680,8 @@ app.get('/api/entries', auth, (req, res) => {
     try {
       entries.push(toClient(e, key));
     } catch {
-      console.warn(`[vault] 条目 ${e.id} 解密失败，已跳过（可能是损坏的备份）`);
+      console.warn(`[vault] 条目 ${e.id} 解密失败`);
+      return res.status(500).json({ error: '发现无法解密的条目，请从备份恢复后重试' });
     }
   }
   res.json({ entries });
@@ -888,7 +951,7 @@ app.post('/api/export-selected', auth, h(async (req, res) => {
  * - 已初始化：必须已解锁才能导入（防止未授权覆盖）
  * - 未初始化（全新部署）：允许直接恢复备份，恢复后使用备份对应的主密码解锁
  */
-app.post('/api/import', h(async (req, res) => {
+app.post('/api/import', withVaultMaintenance(async (req, res) => {
   const unlocked = !!getSession(req);
   if (store.data.kdf && !unlocked) {
     return res.status(401).json({ error: '未解锁或会话已过期' });
@@ -905,27 +968,31 @@ app.post('/api/import', h(async (req, res) => {
     }
   }
 
-  // 还原备份内嵌的附件加密文件（id 校验为 UUID，防止路径穿越）
-  if (d.attachments && typeof d.attachments === 'object') {
+  // 附件是备份传输字段，不属于 vault.json；只恢复到附件目录。
+  const { attachments: embeddedAttachments, ...nextData } = d;
+  if (embeddedAttachments && typeof embeddedAttachments === 'object') {
     await fs.mkdir(ATTACH_DIR, { recursive: true });
-    for (const [id, b64] of Object.entries(d.attachments)) {
+    for (const [id, b64] of Object.entries(embeddedAttachments)) {
       if (!/^[0-9a-fA-F-]{36}$/.test(id) || typeof b64 !== 'string') continue;
       try {
         await fs.writeFile(path.join(ATTACH_DIR, id + '.bin'), Buffer.from(b64, 'base64'));
       } catch { /* 忽略损坏的附件数据 */ }
     }
   }
-  await store.replace(d);
+  await store.replace(nextData);
+  await cleanupOrphanAttachments();
 
   // 统计备份引用的附件在本机是否缺失（附件文件不包含在备份 JSON 里）
   const refIds = new Set();
-  for (const e of d.entries) for (const a of e.attachments || []) refIds.add(a.id);
+  for (const e of nextData.entries) for (const a of e.attachments || []) refIds.add(a.id);
   let missing = 0;
   for (const id of refIds) {
     try { await fs.access(path.join(ATTACH_DIR, id + '.bin')); } catch { missing++; }
   }
 
   sessions.clear(); // 主密码/密钥可能已变化，强制重新解锁
+  totpPending.clear();
+  await clearPendingAttachments();
   res.clearCookie('vsid', { path: '/' });
   res.json({ ok: true, message: '导入成功，请重新解锁', missingAttachments: missing });
 }));

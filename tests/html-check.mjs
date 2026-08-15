@@ -1,8 +1,12 @@
 // 体检：app.js 引用的 #id 是否都在 index.html 中存在；HTML 是否有重复 id；标签是否闭合
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const html = readFileSync('E:/密码本/public/index.html', 'utf8');
-const js = readFileSync('E:/密码本/public/app.js', 'utf8');
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+const html = readFileSync(join(ROOT, 'public', 'index.html'), 'utf8');
+const js = readFileSync(join(ROOT, 'public', 'app.js'), 'utf8');
 
 // 1. HTML 重复 id
 const ids = [...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);

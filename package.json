@@ -5,7 +5,8 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node tests/flow.mjs",
+    "test": "node tests/run-flow.mjs",
+    "test:static": "node tests/html-check.mjs && node tests/runtime-check.mjs",
     "test:ui": "node tests/ui-test.mjs"
   },
   "engines": {

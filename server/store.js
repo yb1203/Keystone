@@ -37,23 +37,24 @@ class VaultStore {
     this._chain = Promise.resolve(); // 写入串行队列，避免并发覆盖
   }
 
-  /** 读取数据文件；不存在则保持默认空库 */
+  /** 读取数据文件；主文件缺失或损坏时尝试回退到 .bak */
   async load() {
     let raw = await this._readOrNull(this.file);
-    if (raw === null) return;
-
-    let parsed = this._parse(raw);
-    if (parsed === null) {
-      // 主文件损坏，尝试回退备份
+    let parsed = raw === null ? null : this._parse(raw);
+    if (raw === null || parsed === null) {
       const bak = await this._readOrNull(this.file + '.bak');
-      if (bak !== null) parsed = this._parse(bak);
+      if (bak === null) {
+        if (raw === null) return; // 首次启动，没有任何数据文件
+        throw new Error(`数据文件损坏且无法从备份恢复：${this.file}`);
+      }
+      parsed = this._parse(bak);
       if (parsed === null) {
         throw new Error(
           `数据文件损坏且无法从备份恢复：${this.file}\n` +
           '请手动检查文件或恢复之前的备份，服务已停止以免覆盖数据。'
         );
       }
-      console.warn('[vault] 主数据文件损坏，已从 .bak 备份恢复');
+      console.warn('[vault] 主数据文件缺失或损坏，已从 .bak 备份恢复');
     }
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.entries)) {
       throw new Error(`数据文件格式无效：${this.file}`);
@@ -64,17 +65,25 @@ class VaultStore {
 
   /** 排队保存（原子写入 + 保留 .bak） */
   save() {
-    this._chain = this._chain.then(() => this._saveNow());
-    return this._chain;
+    return this._enqueue(() => this._saveNow());
   }
 
   /** 整体替换数据（导入备份用），保存成功后生效 */
-  async replace(newData) {
+  replace(newData) {
     const clone = structuredClone(newData);
     clone.version = 1;
     this._backfill(clone); // 兼容旧备份：缺少 categories 时从条目回填
-    await this._saveNow(clone); // 先落盘，成功后才切换内存
-    this.data = clone;
+    return this._enqueue(async () => {
+      await this._saveNow(clone); // 先落盘，成功后才切换内存
+      this.data = clone;
+    });
+  }
+
+  _enqueue(task) {
+    // 上一次保存失败不应让之后所有保存永久失效；每个调用仍会收到自己的错误。
+    const next = this._chain.catch(() => {}).then(task);
+    this._chain = next;
+    return next;
   }
 
   /** 兼容旧版本数据：确保 categories 存在，缺失时从已有条目回填 */
@@ -99,8 +108,9 @@ class VaultStore {
   async _readOrNull(p) {
     try {
       return await fs.readFile(p, 'utf8');
-    } catch {
-      return null;
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return null;
+      throw err;
     }
   }
 
