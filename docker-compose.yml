@@ -1,8 +1,8 @@
 services:
-  vaultbook:
+  keystone:
     build: .
-    image: vaultbook:latest
-    container_name: vaultbook
+    image: keystone:latest
+    container_name: keystone
     ports:
       - "3000:3000"
     environment:

@@ -35,7 +35,7 @@ fi
 
 cd "$INSTALL_DIR"
 printf '[Keystone] Building and starting containers...\n'
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 
 printf '\n[Keystone] Deployment complete.\n'
 printf '[Keystone] Open: http://SERVER_IP:3000\n'

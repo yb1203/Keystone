@@ -50,17 +50,11 @@ curl -fsSL https://raw.githubusercontent.com/yb1203/Keystone/main/scripts/instal
 
 再次执行同一条命令即可拉取最新代码并更新容器；脚本发现未提交的本地改动时会停止，不会覆盖它们。
 
-### 飞牛 NAS（Docker Compose 界面）
-
-在飞牛的 Docker Compose「创建项目」页面中，选择「创建 docker-compose.yml」，项目名称填写 `keystone`，再粘贴 [docker-compose.fnos.yml](docker-compose.fnos.yml) 的内容并启动即可。该配置会从 GitHub 的 `main` 分支构建镜像，首次运行会创建全新的 `vault-data` 数据卷。
-
-默认访问地址为 `http://飞牛NASIP:3000`。若端口已被占用，将配置中的 `"3000:3000"` 改为 `"3001:3000"`，再通过 `http://飞牛NASIP:3001` 访问。
-
 ### 手动部署
 
 ```bash
 # 1. 构建并启动（在项目目录下）
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 
 # 2. 打开浏览器
 #    http://你的服务器IP:3000
@@ -143,7 +137,6 @@ npm run test:static       # 前端静态检查与运行时初始化检查
 
 ```
 ├── docker-compose.yml   # Docker 编排
-├── docker-compose.fnos.yml # 飞牛 NAS Compose 界面部署配置
 ├── Dockerfile           # node:24-alpine 极简镜像（非 root 运行）
 ├── server/
 │   ├── index.js         # Express 服务 + 全部 API
