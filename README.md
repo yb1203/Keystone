@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/yb1203/Keystone/main/scripts/instal
 ### 手动部署
 
 ```bash
-# 1. 构建并启动（在项目目录下）
+# 1. 构建并启动（Docker Compose 会从 GitHub 获取构建代码）
 docker compose up -d --build --remove-orphans
 
 # 2. 打开浏览器

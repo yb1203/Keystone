@@ -1,6 +1,7 @@
 services:
   keystone:
-    build: .
+    build:
+      context: https://github.com/yb1203/Keystone.git#main
     image: keystone:latest
     container_name: keystone
     ports:
