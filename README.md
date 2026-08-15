@@ -34,6 +34,37 @@
 
 ## 🚀 快速开始（Docker 部署）
 
+### Docker Compose 直接部署
+
+在任何 Docker Compose 管理界面中创建项目，项目名称填写 `keystone`，将以下内容直接粘贴为 `docker-compose.yml` 后启动：
+
+```yaml
+services:
+  keystone:
+    build:
+      context: https://github.com/yb1203/Keystone.git#main
+    image: keystone:latest
+    container_name: keystone
+    ports:
+      - "3000:3000"
+    environment:
+      VAULT_AUTO_LOCK_MINUTES: "30"
+      VAULT_UNLOCK_MAX_ATTEMPTS: "5"
+      VAULT_UNLOCK_LOCKOUT_SECONDS: "60"
+      VAULT_ATTACH_MAX_MB: "20"
+      VAULT_BACKUP_KEEP: "7"
+      VAULT_HTTPS: "false"
+      VAULT_TRUST_PROXY: "false"
+    volumes:
+      - vault-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  vault-data:
+```
+
+启动后访问 `http://服务器IP:3000`。若端口已被占用，将 `"3000:3000"` 改成 `"3001:3000"`。同一份配置也保存在 [docker-compose.yml](docker-compose.yml)。
+
 ### 在线命令部署（Linux 服务器）
 
 服务器已安装并启动 Docker、Docker Compose v2 与 Git 后，在准备部署的目录执行：
