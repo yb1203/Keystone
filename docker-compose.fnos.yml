@@ -1,0 +1,24 @@
+# fnOS Docker Compose UI deployment.
+# The remote Git context lets the NAS build directly from this repository.
+services:
+  vaultbook:
+    build:
+      context: https://github.com/yb1203/Keystone.git#main
+    image: vaultbook:latest
+    container_name: vaultbook
+    ports:
+      - "3000:3000"
+    environment:
+      VAULT_AUTO_LOCK_MINUTES: "30"
+      VAULT_UNLOCK_MAX_ATTEMPTS: "5"
+      VAULT_UNLOCK_LOCKOUT_SECONDS: "60"
+      VAULT_ATTACH_MAX_MB: "20"
+      VAULT_BACKUP_KEEP: "7"
+      VAULT_HTTPS: "false"
+      VAULT_TRUST_PROXY: "false"
+    volumes:
+      - vault-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  vault-data:
