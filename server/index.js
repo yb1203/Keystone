@@ -32,8 +32,10 @@ const LOCKOUT_MS = (Number(process.env.VAULT_UNLOCK_LOCKOUT_SECONDS) || 60) * 10
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const ATTACH_DIR = path.join(DATA_DIR, 'attachments'); // 附件加密文件目录
 const BACKUP_DIR = path.join(DATA_DIR, 'backups'); // 自动备份目录
+const RESET_MARKER_FILE = path.join(DATA_DIR, '.reset-token');
 const BACKUP_KEEP = Number(process.env.VAULT_BACKUP_KEEP) || 7; // 自动备份保留份数
 const MAX_ATTACH_BYTES = (Number(process.env.VAULT_ATTACH_MAX_MB) || 20) * 1024 * 1024; // 单文件上限（默认 20MB）
+const RESET_TOKEN = String(process.env.VAULT_RESET_TOKEN || '').trim();
 
 // HTTPS 部署模式：开启后 Cookie 加 Secure 标志并启用 HSTS（必须走 TLS 反向代理）
 const SECURE_MODE = process.env.VAULT_HTTPS === 'true';
@@ -64,6 +66,26 @@ app.use((req, res, next) => {
 });
 
 const store = new VaultStore(DATA_FILE);
+
+/**
+ * 由 Compose 显式请求时清空数据卷。令牌只保存哈希；相同令牌只会执行一次，
+ * 既方便忘记主密码后的重新初始化，也避免每次容器重启都误删数据。
+ */
+async function resetVaultIfRequested() {
+  if (!RESET_TOKEN) return;
+  const tokenHash = crypto.createHash('sha256').update(RESET_TOKEN).digest('hex');
+  let previous = '';
+  try { previous = (await fs.readFile(RESET_MARKER_FILE, 'utf8')).trim(); } catch { /* 首次执行 */ }
+  if (previous === tokenHash) return;
+
+  await fs.rm(DATA_FILE, { force: true });
+  await fs.rm(DATA_FILE + '.bak', { force: true });
+  await fs.rm(ATTACH_DIR, { recursive: true, force: true });
+  await fs.rm(BACKUP_DIR, { recursive: true, force: true });
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(RESET_MARKER_FILE, tokenHash, { mode: 0o600 });
+  console.warn('[vault] 已按 VAULT_RESET_TOKEN 请求清空密码库');
+}
 
 // 会话：sessionId -> { key: Buffer, lastActive: number }（密钥仅存内存）
 const sessions = new Map();
@@ -271,9 +293,9 @@ function cleanCategory(v) {
 }
 
 /** 条目保存时自动注册新出现的分类 */
-function ensureCategory(name) {
-  if (name && !store.data.categories.includes(name)) {
-    store.data.categories.push(name);
+function ensureCategory(name, data = store.data) {
+  if (name && !data.categories.includes(name)) {
+    data.categories.push(name);
   }
 }
 
@@ -695,7 +717,6 @@ app.post('/api/entries', auth, h(async (req, res) => {
   const category = cleanCategory(body.category);
   if (!category) return res.status(400).json({ error: '请选择或新建分类' });
 
-  ensureCategory(category); // 新分类自动注册
   const { fields, error } = parseFields(body.fields);
   if (error) return res.status(400).json({ error });
   const subtitle = String(body.subtitle ?? '').trim().slice(0, 120);
@@ -713,18 +734,22 @@ app.post('/api/entries', auth, h(async (req, res) => {
   if (icon) entry.icon = icon;
   // 绑定新增流程中"先上传、保存时再关联"的附件（attachIds 仅限本会话的待绑定附件）
   const pending = pendingAtts.get(req.session.sid);
+  const consumedPendingIds = [];
   if (Array.isArray(body.attachIds) && pending) {
     entry.attachments = [];
     for (const id of body.attachIds) {
       const att = pending.items.get(id);
       if (att) {
         entry.attachments.push(att);
-        pending.items.delete(id);
+        consumedPendingIds.push(id);
       }
     }
   }
-  store.data.entries.push(entry);
-  await store.save();
+  const nextData = structuredClone(store.data);
+  ensureCategory(category, nextData); // 所有校验完成后再注册新分类
+  nextData.entries.push(entry);
+  await store.replace(nextData);
+  for (const id of consumedPendingIds) pending.items.delete(id);
   res.status(201).json({ entry: toClient(entry, req.session.key) });
 }));
 
@@ -738,7 +763,13 @@ app.put('/api/entries/:id', auth, h(async (req, res) => {
   const category = cleanCategory(body.category);
   if (!category) return res.status(400).json({ error: '请选择或新建分类' });
 
-  ensureCategory(category); // 新分类自动注册
+  let parsedFields = null;
+  if (body.fields !== undefined) {
+    const parsed = parseFields(body.fields);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    parsedFields = parsed.fields;
+  }
+  ensureCategory(category); // 所有可能失败的字段校验完成后再注册新分类
   entry.category = category;
   if (body.favorite !== undefined) entry.favorite = !!body.favorite; // 未传则保留原收藏状态（弹窗已无收藏入口，星标在卡片上）
   entry.updatedAt = Date.now();
@@ -753,10 +784,8 @@ app.put('/api/entries/:id', auth, h(async (req, res) => {
     if (icon) entry.icon = icon;
     else delete entry.icon;
   }
-  if (body.fields !== undefined) { // 未传 fields 时保留原字段（兼容）
-    const { fields, error } = parseFields(body.fields);
-    if (error) return res.status(400).json({ error });
-    entry.fields = encryptFields(fields ?? [], req.session.key);
+  if (parsedFields !== null) { // 未传 fields 时保留原字段（兼容）
+    entry.fields = encryptFields(parsedFields, req.session.key);
   }
   await store.save();
   res.json({ entry: toClient(entry, req.session.key) });
@@ -766,9 +795,10 @@ app.put('/api/entries/:id', auth, h(async (req, res) => {
 app.delete('/api/entries/:id', auth, h(async (req, res) => {
   const idx = store.data.entries.findIndex((e) => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: '条目不存在' });
-  const [removed] = store.data.entries.splice(idx, 1);
-  for (const a of removed.attachments || []) await removeAttachmentFile(a.id); // 级联删除附件
-  await store.save();
+  const nextData = structuredClone(store.data);
+  const [removed] = nextData.entries.splice(idx, 1);
+  await store.replace(nextData);
+  for (const a of removed.attachments || []) await removeAttachmentFile(a.id); // 元数据成功落盘后再级联删除
   res.json({ ok: true });
 }));
 
@@ -852,9 +882,11 @@ app.get('/api/attachments/:id', auth, h(async (req, res) => {
 app.delete('/api/attachments/:id', auth, h(async (req, res) => {
   const found = findAttachment(req.params.id);
   if (!found) return res.status(404).json({ error: '附件不存在' });
-  found.entry.attachments = (found.entry.attachments || []).filter((a) => a.id !== found.att.id);
-  await removeAttachmentFile(found.att.id);
-  await store.save();
+  const nextData = structuredClone(store.data);
+  const nextEntry = nextData.entries.find((e) => e.id === found.entry.id);
+  nextEntry.attachments = (nextEntry.attachments || []).filter((a) => a.id !== found.att.id);
+  await store.replace(nextData);
+  await removeAttachmentFile(found.att.id); // 元数据成功落盘后再删除文件
   res.json({ ok: true });
 }));
 
@@ -1040,6 +1072,7 @@ async function makeBackup() {
 
 // ---------------- 启动 ----------------
 (async () => {
+  await resetVaultIfRequested();
   await store.load();
   await cleanupOrphanAttachments(); // 清理失效的附件加密文件
   if (store.data.kdf) await makeBackup(); // 已有数据则启动时备份一次

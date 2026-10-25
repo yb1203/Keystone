@@ -15,10 +15,20 @@ services:
       - VAULT_UNLOCK_LOCKOUT_SECONDS=60
       # 单个附件大小上限（MB）
       - VAULT_ATTACH_MAX_MB=20
+      # 自动备份保留份数
+      - VAULT_BACKUP_KEEP=7
+      # 忘记主密码需要清空密码库时，改为一个新的非空值后重新部署一次。
+      # 同一个值只会生效一次；留空表示不执行重置。
+      - VAULT_RESET_TOKEN=
       # 部署在 HTTPS 反向代理后面时设为 true：
       #  - Cookie 加 Secure 标志（只在 HTTPS 下传输）
       #  - 启用 HSTS（强制浏览器走 HTTPS）
       #  - 必须配合 VAULT_TRUST_PROXY=true，否则限流看到的都是代理 IP
       - VAULT_HTTPS=false
       - VAULT_TRUST_PROXY=false
+    volumes:
+      - vault-data:/app/data
     restart: unless-stopped
+
+volumes:
+  vault-data:

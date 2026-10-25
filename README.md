@@ -53,9 +53,17 @@ services:
       VAULT_UNLOCK_LOCKOUT_SECONDS: "60"
       VAULT_ATTACH_MAX_MB: "20"
       VAULT_BACKUP_KEEP: "7"
+      # 忘记主密码时，改成新的非空值后重新部署一次即可清空密码库。
+      # 同一个值只会生效一次；留空表示不重置。
+      VAULT_RESET_TOKEN: ""
       VAULT_HTTPS: "false"
       VAULT_TRUST_PROXY: "false"
+    volumes:
+      - vault-data:/app/data
     restart: unless-stopped
+
+volumes:
+  vault-data:
 ```
 
 启动后访问 `http://服务器IP:3000`。若端口已被占用，将 `"3000:3000"` 改成 `"3001:3000"`。同一份配置也保存在 [docker-compose.yml](docker-compose.yml)。
@@ -89,7 +97,9 @@ docker compose up -d --build --remove-orphans
 #    ⚠️ 主密码无法找回，务必牢记！忘记 = 数据永久丢失
 ```
 
-数据保存在容器内的 `/app/data/`。正常重启容器不会丢失；删除容器后数据会一并清空，重新部署将进入首次初始化。请在删除容器前导出加密备份。
+数据保存在 Docker 卷 `vault-data` 中（`/app/data/`），更新或重建容器不会丢失。删除容器前请先导出加密备份。
+
+**忘记主密码并需要重新开始：** 无需进入服务器找文件。将 Compose 里的 `VAULT_RESET_TOKEN` 改成一个新的非空值，例如 `reset-20261026`，重新部署一次即可清空密码库并回到首次初始化。相同令牌只会执行一次，重置完成后可改回空值。
 
 默认可通过 HTTP 在本机或可信内网使用。**公网访问必须加 HTTPS**：用 Caddy / Nginx 反代到 3000 端口，并设置环境变量 `VAULT_HTTPS=true`、`VAULT_TRUST_PROXY=true`。
 
@@ -114,6 +124,7 @@ npm start          # 默认 http://localhost:3000
 | `VAULT_UNLOCK_LOCKOUT_SECONDS` | `60` | 失败封禁时长（秒） |
 | `VAULT_ATTACH_MAX_MB` | `20` | 单个附件大小上限（MB） |
 | `VAULT_BACKUP_KEEP` | `7` | 自动备份保留份数 |
+| `VAULT_RESET_TOKEN` | 空 | 改为新的非空值并重启时清空密码库；相同值只执行一次 |
 | `VAULT_HTTPS` | `false` | 部署在 HTTPS 反代后时设为 `true`（Cookie Secure + HSTS） |
 | `VAULT_TRUST_PROXY` | `false` | 反代后设为 `true`（解锁限流才能看到真实 IP） |
 
@@ -140,7 +151,7 @@ npm start          # 默认 http://localhost:3000
 ## 🧪 测试
 
 ```bash
-npm test                  # 自包含 API 全流程测试（131 项，使用临时服务与临时数据目录）
+npm test                  # 自包含 API 全流程测试（含 Compose 重置令牌，使用临时服务与临时数据目录）
 npm run test:static       # 前端静态检查与运行时初始化检查
 ```
 

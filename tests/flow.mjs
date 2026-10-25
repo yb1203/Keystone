@@ -132,6 +132,11 @@ console.log('— 字段类型值校验 —');
 // 数字字段含字母 → 400
 r = await req('/api/entries', { method: 'POST', body: JSON.stringify({ title: '坏数字', category: '社交', fields: [{ name: '卡号', type: 'number', value: 'abc123' }] }) }, cookie);
 check('数字字段含字母被拒(400)', r.status === 400);
+// 失败请求不能偷偷注册分类，否则之后任意保存都会把“幽灵分类”落盘。
+r = await req('/api/entries', { method: 'POST', body: JSON.stringify({ title: '幽灵分类测试', category: '不应出现的分类', fields: [{ name: '邮箱', type: 'email', value: 'invalid' }] }) }, cookie);
+check('失败新增不注册分类', r.status === 400 && !(await req('/api/categories', {}, cookie)).data.categories.includes('不应出现的分类'));
+r = await req(`/api/entries/${e1.id}`, { method: 'PUT', body: JSON.stringify({ title: '微信', category: '编辑时不应出现的分类', fields: [{ name: '邮箱', type: 'email', value: 'invalid' }] }) }, cookie);
+check('失败编辑不注册分类', r.status === 400 && !(await req('/api/categories', {}, cookie)).data.categories.includes('编辑时不应出现的分类'));
 // 数字字段允许空格/连字符（卡号、手机号）
 r = await req('/api/entries', { method: 'POST', body: JSON.stringify({ title: '好数字', category: '社交', fields: [{ name: '卡号', type: 'number', value: '6222 0000-1234' }] }) }, cookie);
 check('数字字段允许空格连字符', r.status === 201);

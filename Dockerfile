@@ -16,9 +16,6 @@ COPY public ./public
 RUN mkdir -p /app/data && chown -R node:node /app && chmod -R g-w /app/data
 USER node
 
-# 数据卷：所有数据（vault.json 及备份）都保存在这里
-VOLUME ["/app/data"]
-
 ENV PORT=3000
 ENV HOST=0.0.0.0
 EXPOSE 3000
