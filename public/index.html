@@ -89,21 +89,36 @@
       </div>
     </header>
 
-    <div class="chips-row">
-      <nav class="chips" id="chips"></nav>
-      <select id="sort-select" class="sort-select" title="排序方式">
-        <option value="updated">最近更新</option>
-        <option value="name">名称</option>
-        <option value="created">创建时间</option>
-      </select>
-    </div>
+    <div class="vault-layout">
+      <aside class="category-panel">
+        <div class="category-panel-head">
+          <span>密码本</span>
+          <span class="category-panel-note">分类</span>
+        </div>
+        <nav class="chips" id="chips"></nav>
+      </aside>
 
-    <main class="grid" id="grid"></main>
+      <section class="vault-content">
+        <div class="content-toolbar">
+          <div>
+            <p class="content-eyebrow">已解锁的密码库</p>
+            <h1>我的凭据</h1>
+          </div>
+          <select id="sort-select" class="sort-select" title="排序方式">
+            <option value="updated">最近更新</option>
+            <option value="name">名称</option>
+            <option value="created">创建时间</option>
+          </select>
+        </div>
 
-    <div class="empty hidden" id="empty">
-      <div class="empty-icon">🔐</div>
-      <h2 id="empty-title">还没有任何条目</h2>
-      <p id="empty-text">点击右上角「新增」，开始记录你的第一个账号密码</p>
+        <main class="grid" id="grid"></main>
+
+        <div class="empty hidden" id="empty">
+          <div class="empty-icon">🔐</div>
+          <h2 id="empty-title">还没有任何条目</h2>
+          <p id="empty-text">点击右上角「新增」，开始记录你的第一个账号密码</p>
+        </div>
+      </section>
     </div>
   </section>
 

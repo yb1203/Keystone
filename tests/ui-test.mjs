@@ -1,12 +1,22 @@
 // UI 端到端测试：用系统 Chrome(headless + CDP) 驱动界面，逐步截图
 // 运行：node tests/ui-test.mjs
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const BASE = 'http://127.0.0.1:3777';
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const PROFILE = 'E:/密码本/.chrome-profile';
-const SHOTS = 'E:/密码本/shots';
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const CHROME_CANDIDATES = process.platform === 'darwin'
+  ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+  : process.platform === 'win32'
+    ? ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe']
+    : ['google-chrome', 'chromium', 'chromium-browser'];
+const CHROME = process.env.CHROME_BIN || CHROME_CANDIDATES.find((p) => p.includes('/') ? existsSync(p) : true);
+const PROFILE = join(ROOT, '.chrome-profile');
+const SHOTS = join(ROOT, 'shots');
+
+if (!CHROME) throw new Error('未找到 Chrome；可通过 CHROME_BIN 指定浏览器路径');
 
 mkdirSync(SHOTS, { recursive: true });
 rmSync(PROFILE, { recursive: true, force: true });
@@ -68,6 +78,7 @@ async function evaluate(expression) {
 }
 
 async function sleep(ms) { await new Promise(r => setTimeout(r, ms)); }
+const cardExpr = (title) => `[...document.querySelectorAll('.card')].find((card) => card.querySelector('h3')?.textContent === ${JSON.stringify(title)})`;
 
 async function screenshot(name) {
   const r = await send('Page.captureScreenshot', { format: 'png' });
@@ -127,6 +138,10 @@ async function addEntry(title, category, account, password, url, note, fav) {
     return true;
   })()`);
   await sleep(800);
+  if (fav) {
+    await evaluate(`${cardExpr(title)}.querySelector('button[data-act="star"]').click()`);
+    await sleep(300);
+  }
   return await evaluate(`document.querySelectorAll('.card').length`);
 }
 
@@ -135,16 +150,16 @@ check('新增条目 2', (await addEntry('招商银行储蓄卡', '银行', '6222
 check('新增条目 3', (await addEntry('QQ 邮箱', '邮箱', 'user@qq.com', 'Mail@2024!Ok', 'https://mail.qq.com', '', false)) === 3);
 
 // 卡片内容验证
-check('卡片标题正确', await evaluate(`document.querySelector('.card h3').textContent === '微信'`));
-check('卡片分类徽标正确', await evaluate(`document.querySelector('.card .badge').textContent === '社交'`));
-check('账号字段有复制按钮', await evaluate(`document.querySelectorAll('.card-field')[0].querySelector('button[data-act="f-copy"]') !== null`));
-check('密码默认掩码', await evaluate(`document.querySelector('.card-field .f-value.secret').textContent.includes('•')`));
+check('卡片标题正确', await evaluate(`Boolean(${cardExpr('微信')})`));
+check('卡片分类徽标正确', await evaluate(`${cardExpr('微信')}?.querySelector('.badge')?.textContent === '社交'`));
+check('账号字段有复制按钮', await evaluate(`${cardExpr('微信')}?.querySelector('.card-field button[data-act="f-copy"]') !== null`));
+check('密码默认掩码', await evaluate(`${cardExpr('微信')}?.querySelector('.card-field .f-value.secret')?.textContent.includes('•')`));
 await screenshot('3-条目列表亮色');
 
 // ---------- 4. 搜索过滤 ----------
-await evaluate(`(() => { const s = document.querySelector('#search'); s.value = '招行'; s.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+await evaluate(`(() => { const s = document.querySelector('#search'); s.value = '招商'; s.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
 await sleep(300);
-check('搜索"招行"只剩 1 条', await evaluate(`document.querySelectorAll('.card').length === 1`));
+check('搜索"招商"只剩 1 条', await evaluate(`document.querySelectorAll('.card').length === 1`));
 await evaluate(`(() => { const s = document.querySelector('#search'); s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
 await sleep(300);
 
@@ -156,9 +171,9 @@ await evaluate(`[...document.querySelectorAll('.chip')].find(c => c.dataset.cat 
 await sleep(300);
 
 // ---------- 6. 显示密码 / 复制 ----------
-await evaluate(`document.querySelector('.card-field[data-idx="1"] button[data-act="f-eye"]').click()`);
+await evaluate(`${cardExpr('微信')}.querySelector('.card-field[data-idx="1"] button[data-act="f-eye"]').click()`);
 await sleep(200);
-check('眼睛切换显示明文', await evaluate(`document.querySelector('.card-field[data-idx="1"] .f-value').textContent === 'wxP@ss!2024'`));
+check('眼睛切换显示明文', await evaluate(`${cardExpr('微信')}.querySelector('.card-field[data-idx="1"] .f-value').textContent === 'wxP@ss!2024'`));
 
 // ---------- 7. 暗色模式 ----------
 await evaluate(`document.querySelector('#theme-btn').click()`);
@@ -174,18 +189,18 @@ await evaluate(`[...document.querySelectorAll('.chip')].find(c => c.dataset.cat 
 await sleep(300);
 
 // ---------- 9. 编辑条目 ----------
-await evaluate(`document.querySelector('.card button[data-act="edit"]').click()`);
+await evaluate(`${cardExpr('微信')}.querySelector('button[data-act="edit"]').click()`);
 await sleep(300);
 check('编辑弹窗回填标题', await evaluate(`document.querySelector('#m-title').value === '微信'`));
 await evaluate(`(() => { const t = document.querySelector('#m-title'); t.value = '微信（主号）'; t.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#entry-form').requestSubmit(); return true; })()`);
 await sleep(600);
-check('编辑后标题更新', await evaluate(`document.querySelector('.card h3').textContent === '微信（主号）'`));
+check('编辑后标题更新', await evaluate(`Boolean(${cardExpr('微信（主号）')})`));
 
 // ---------- 10. 删除（两步确认） ----------
-await evaluate(`document.querySelector('.card button[data-act="delete"]').click()`);
+await evaluate(`${cardExpr('微信（主号）')}.querySelector('button[data-act="delete"]').click()`);
 await sleep(200);
-check('首次点击进入确认态', await evaluate(`document.querySelector('.card button[data-act="delete"]').classList.contains('confirm')`));
-await evaluate(`document.querySelector('.card button[data-act="delete"]').click()`);
+check('首次点击进入确认态', await evaluate(`${cardExpr('微信（主号）')}.querySelector('button[data-act="delete"]').classList.contains('confirm')`));
+await evaluate(`${cardExpr('微信（主号）')}.querySelector('button[data-act="delete"]').click()`);
 await sleep(600);
 check('确认后删除成功', await evaluate(`document.querySelectorAll('.card').length === 2`));
 
@@ -206,6 +221,14 @@ await evaluate(`(() => { const p = document.querySelector('#lock-pw'); p.value =
 await sleep(2500);
 check('正确密码解锁回到主界面', await evaluate(`!document.querySelector('#view-main').classList.contains('hidden')`));
 check('解锁后数据仍在', await evaluate(`document.querySelectorAll('.card').length === 2`));
+
+// ---------- 14. 移动端布局 ----------
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+await sleep(400);
+check('移动端无横向页面溢出', await evaluate(`document.documentElement.scrollWidth <= window.innerWidth`));
+check('移动端条目为单列', await evaluate(`document.querySelectorAll('.card').length === 2`));
+await screenshot('7-移动端凭据列表');
+await send('Emulation.clearDeviceMetricsOverride');
 
 // ---------- 14. 刷新页面后会话保持 ----------
 await send('Page.reload');

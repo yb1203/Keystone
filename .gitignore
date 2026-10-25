@@ -13,6 +13,7 @@ tests/backup-test.json
 tests/backup-test.json.secret
 tests/icon-test.json
 shots/
+.chrome-profile/
 
 # 编辑器/IDE
 .vscode/

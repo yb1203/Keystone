@@ -251,8 +251,12 @@ function cardHTML(e) {
   }
   // 卡片显示：置顶(📌)字段 + 组间分割线；4 条上限只数真实字段，分割线不占名额
   const pinned = fields.filter((f) => f.pinned);
+  // 旧条目可能还没有“置顶”配置；仍展示前两个字段，保证列表始终像密码本而非通讯录。
+  const visibleFields = pinned.length
+    ? pinned
+    : fields.filter((f) => f.type !== 'divider').slice(0, 2);
   const isExpanded = state.expandedCards.has(e.id);
-  const shownPinned = isExpanded ? pinned : pinned.slice(0, 4);
+  const shownPinned = isExpanded ? visibleFields : visibleFields.slice(0, 4);
   const more = Math.max(0, pinned.length - 4);
   let rows = '';
   let toggleBtn = '';
@@ -340,41 +344,16 @@ function fieldRowHTML(f, idx) {
   </div>`;
 }
 
-/** 当前分列数：宽屏 4 列，窄屏递减 */
-function columnCount() {
-  const w = window.innerWidth;
-  if (w <= 480) return 1;
-  if (w <= 820) return 2;
-  if (w <= 1024) return 3;
-  return 4;
-}
-
-/**
- * 分列堆叠布局：
- * 第 1~N 张从左到右占第 1 行；之后每张按顺序轮流分到各列，
- * 始终叠在自己那列上一张卡片的下面 —— 不按行对齐，也不找最矮列。
- */
+/** 凭据列表使用普通文档流，内容高度不会导致相邻条目错位。 */
 function layoutGrid() {
   const grid = $('#grid');
-  const empty = $('#empty');
-  if (empty && !empty.classList.contains('hidden')) { grid.style.height = 'auto'; return; }
-  const cards = [...grid.children];
-  if (!cards.length) return;
-  const gap = 16;
-  const pad = parseFloat(getComputedStyle(grid).paddingLeft) || 0;
-  const innerW = grid.clientWidth - pad * 2;
-  const cols = columnCount();
-  const cardW = (innerW - (cols - 1) * gap) / cols;
-  const colH = new Array(cols).fill(0);
-  cards.forEach((card, i) => {
-    const idx = i % cols; // 严格按顺序轮流分列（第 1、5、9…张在第 1 列）
-    card.style.position = 'absolute';
-    card.style.width = cardW + 'px';
-    card.style.left = pad + idx * (cardW + gap) + 'px';
-    card.style.top = colH[idx] + 'px';
-    colH[idx] += card.offsetHeight + gap;
-  });
-  grid.style.height = (Math.max(...colH) - gap + pad * 2) + 'px';
+  grid.style.height = '';
+  for (const card of grid.children) {
+    card.style.position = '';
+    card.style.width = '';
+    card.style.left = '';
+    card.style.top = '';
+  }
 }
 
 function renderGrid() {
@@ -417,9 +396,7 @@ function renderGrid() {
     empty.classList.add('hidden');
   }
 
-  layoutGrid(); // 分列堆叠排版
-  // 卡片内图片（图标）加载完成后高度可能变化，重新排版
-  grid.querySelectorAll('img').forEach((img) => img.addEventListener('load', layoutGrid));
+  layoutGrid();
 }
 
 // 窗口尺寸变化时重新排版（防抖）
@@ -544,8 +521,8 @@ function openModal(entry = null) {
   renderIconPicker();
   populateCategorySelect(entry?.category ?? '');
   renderFields(entry?.fields || [
-    { name: '账号', type: 'text', value: '' },
-    { name: '密码', type: 'password', value: '' },
+    { name: '账号', type: 'text', value: '', pinned: true, copyable: true },
+    { name: '密码', type: 'password', value: '', pinned: true, copyable: true },
   ]);
   renderAttachSection(isEdit);
   $('#modal').classList.remove('hidden');
