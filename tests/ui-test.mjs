@@ -197,11 +197,11 @@ check('宽桌面三列卡片', await evaluate(`(() => {
   const cards = [...document.querySelectorAll('.card')].map((card) => card.getBoundingClientRect());
   return cards.length === 3 && cards.every((card) => Math.abs(card.top - cards[0].top) < 2) && cards[0].left < cards[1].left && cards[1].left < cards[2].left;
 })()`));
-check('卡片说明文字不再过小', await evaluate(`(() => {
+check('全页面字号回到紧凑档位', await evaluate(`(() => {
   const css = (selector) => getComputedStyle(document.querySelector(selector));
-  return parseFloat(css('body').fontSize) >= 16 && parseFloat(css('.chip').fontSize) >= 15 &&
-    parseFloat(css('.sort-select').fontSize) >= 14 && parseFloat(css('.card-sub').fontSize) >= 14 &&
-    parseFloat(css('.card-field .f-name').fontSize) >= 14 && parseFloat(css('.card-time').fontSize) >= 13 &&
+  return parseFloat(css('body').fontSize) === 15 && parseFloat(css('.chip').fontSize) === 13.5 &&
+    parseFloat(css('.sort-select').fontSize) === 13 && parseFloat(css('.card-sub').fontSize) === 12.5 &&
+    parseFloat(css('.card-field .f-name').fontSize) === 12.5 && parseFloat(css('.card-time').fontSize) === 12 &&
     parseFloat(css('.card-time').fontWeight) <= 500;
 })()`));
 check('分类、时间和操作按钮位于同一行', await evaluate(`(() => {
