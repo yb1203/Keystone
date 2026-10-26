@@ -83,12 +83,16 @@ const state = {
   unlocked: false,
   autoLockMinutes: 30,
   totpEnabled: false,
+  httpsRequired: false,
+  secureConnection: false,
   categories: [],
   entries: [],
   category: '全部',
   search: '',
-  sort: localStorage.getItem('vault-sort') || 'updated', // updated | name | created
+  sort: ['updated', 'name', 'created'].includes(localStorage.getItem('vault-sort'))
+    ? localStorage.getItem('vault-sort') : 'updated',
   editingId: null,
+  viewingId: null,
   importedEntryCount: null, // 刚导入的备份条目数（用于解锁后校验是否解密成功）
   selectMode: false, // 批量多选模式
   selected: new Set(), // 已选条目 id
@@ -98,6 +102,8 @@ const state = {
   idleTimer: null,
   lastIdleReset: 0,
 };
+const ACTIVITY_KEY = 'keystone-last-activity';
+const LOCK_KEY = 'keystone-lock-event';
 
 // ---------------- API ----------------
 async function api(path, opts = {}) {
@@ -158,7 +164,28 @@ function applyTheme() {
 // ---------------- 视图：解锁 / 锁定 ----------------
 function showLock(msg) {
   state.unlocked = false;
+  clearTimeout(state.idleTimer);
+  if (!$('#preview-modal').classList.contains('hidden')) closePreview();
+  if (!$('#view-modal').classList.contains('hidden')) closeEntryView(false);
+  if (!$('#modal').classList.contains('hidden')) closeModal();
+  if (!$('#settings-modal').classList.contains('hidden')) closeSettings();
+  $('#entry-form').reset();
+  $('#fields-list').replaceChildren();
+  $('#attach-list').replaceChildren();
+  $('#totp-secret').textContent = '';
+  $('#totp-qr').removeAttribute('src');
+  $('#recovery-list').replaceChildren();
+  $('#health-list').replaceChildren();
+  $('#health-summary').textContent = '';
+  $$('#settings-modal input').forEach((input) => { if (input.type !== 'checkbox') input.value = ''; });
+  $('#lock-pw').value = '';
   state.entries = [];
+  state.categories = [];
+  state.search = '';
+  state.expandedCards.clear();
+  $('#search').value = '';
+  $('#grid').replaceChildren();
+  $('#chips').replaceChildren();
   if (state.selectMode) exitSelectMode(); // 锁定前退出多选
   showView('lock');
   $('#lock-totp').value = '';
@@ -214,8 +241,42 @@ function render() {
 function renderChips() {
   const chips = ['全部', ...state.categories, '收藏']; // 收藏筛选放在分类后面
   $('#chips').innerHTML = chips
-    .map((c) => `<button class="chip${state.category === c ? ' active' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`)
+    .map((c) => {
+      const count = c === '全部' ? state.entries.length
+        : c === '收藏' ? state.entries.filter((e) => e.favorite).length
+          : state.entries.filter((e) => e.category === c).length;
+      return `<button class="chip${state.category === c ? ' active' : ''}" data-cat="${esc(c)}">${esc(c)}<span class="chip-count">${count}</span></button>`;
+    })
     .join('');
+}
+
+const nameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+
+function compareNames(a, b) {
+  const left = String(a).trim();
+  const right = String(b).trim();
+  const group = (name) => /^[a-z0-9]/i.test(name) ? 0 : 1;
+  return group(left) - group(right) || nameCollator.compare(left, right);
+}
+
+function entryTime(entry, field) {
+  const value = entry[field];
+  const time = typeof value === 'number' ? value
+    : typeof value === 'string' && /^\d+$/.test(value) ? Number(value)
+      : typeof value === 'string' ? Date.parse(value) : NaN;
+  return Number.isFinite(time) && time > 0 ? time : 0;
+}
+
+function formatTimeValue(time, short = false) {
+  if (!time) return '时间未知';
+  const date = new Date(time);
+  const pad = (n) => String(n).padStart(2, '0');
+  const day = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${short ? '' : `${date.getFullYear()}-`}${day} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatEntryTime(entry, short = false) {
+  return formatTimeValue(entryTime(entry, state.sort === 'created' ? 'createdAt' : 'updatedAt'), short);
 }
 
 function cardHTML(e) {
@@ -236,7 +297,7 @@ function cardHTML(e) {
     return `
     <article class="card sel-card${on ? ' selected' : ''}" data-id="${esc(e.id)}">
       <div class="card-top">
-        <div class="avatar" style="background:${color}">${avatarInner}</div>
+        <div class="avatar">${avatarInner}</div>
         <div class="card-title">
           <h3>${highlight(e.title, q)}</h3>
           ${e.subtitle ? `<p class="card-sub">${esc(e.subtitle)}</p>` : ''}
@@ -244,7 +305,7 @@ function cardHTML(e) {
         <span class="sel-box${on ? ' on' : ''}">${on ? '✓' : ''}</span>
       </div>
       <div class="card-bottom">
-        <span class="badge" style="color:${color};background:color-mix(in srgb, ${color} 13%, transparent)">${esc(e.category)}</span>
+        <span class="badge" style="--category-color:${color}">${esc(e.category)}</span>
         <span class="sel-hint">点击选择</span>
       </div>
     </article>`;
@@ -257,27 +318,29 @@ function cardHTML(e) {
     : fields.filter((f) => f.type !== 'divider').slice(0, 2);
   const isExpanded = state.expandedCards.has(e.id);
   const shownPinned = isExpanded ? visibleFields : visibleFields.slice(0, 4);
-  const more = Math.max(0, pinned.length - 4);
+  const more = Math.max(0, visibleFields.length - 4);
   let rows = '';
   let toggleBtn = '';
   if (pinned.length) {
-    // 按原顺序遍历：保留被显示的字段；分割线只在"前后都有被显示字段"时才保留（有分组意义）
+    // 保留每个可见字段前最近的分组线，包括第一组；末尾的分组线不显示。
     const shownIdx = new Set(shownPinned.map((f) => fields.indexOf(f)));
     const display = [];
-    let lastShown = -1;
+    let pendingDivider = null;
     fields.forEach((f, i) => {
       if (f.type === 'divider') {
-        const hasAfter = fields.slice(i + 1).some((x, j) => shownIdx.has(i + 1 + j));
-        if (lastShown !== -1 && hasAfter) display.push(f);
+        pendingDivider = f;
       } else if (shownIdx.has(i)) {
+        if (pendingDivider) display.push(pendingDivider);
         display.push(f);
-        lastShown = i;
+        pendingDivider = null;
       }
     });
     rows = display.map((f) => fieldRowHTML(f, fields.indexOf(f))).join('');
     if (more > 0) {
       toggleBtn = `<button class="f-more-btn" data-act="toggle-fields">${isExpanded ? '▲ 收起' : `＋ ${more} 个字段`}</button>`;
     }
+  } else {
+    rows = shownPinned.map((f) => fieldRowHTML(f, fields.indexOf(f))).join('');
   }
   return `
   <article class="card" data-id="${esc(e.id)}">
@@ -291,8 +354,10 @@ function cardHTML(e) {
     </div>
     ${rows ? `<div class="card-fields">${rows}${toggleBtn}</div>` : ''}
     <div class="card-bottom">
-      <span class="badge" style="color:${color};background:color-mix(in srgb, ${color} 13%, transparent)">${esc(e.category)}</span>
+      <span class="badge" style="--category-color:${color}">${esc(e.category)}</span>
+      <span class="card-time" title="${state.sort === 'created' ? '创建时间' : '最近更新'}"><span class="time-full">${formatEntryTime(e)}</span><span class="time-short">${formatEntryTime(e, true)}</span></span>
       <div class="card-actions">
+        <button class="icon-btn sm" data-act="view" title="查看详情" aria-label="查看详情">${ICONS.eye}</button>
         <button class="icon-btn sm" data-act="edit" title="编辑">${ICONS.edit}</button>
         <button class="icon-btn sm danger" data-act="delete" title="删除">${ICONS.trash}</button>
       </div>
@@ -363,16 +428,18 @@ function renderGrid() {
   else if (state.category !== '全部') list = list.filter((e) => e.category === state.category);
   if (q) {
     list = list.filter((e) => {
-      const haystack = [e.title, ...(e.fields || []).flatMap((f) => [f.name, f.value])]
+      const haystack = [e.title, e.subtitle, e.category, ...(e.fields || []).flatMap((f) => [f.name, f.value])]
         .map((v) => String(v ?? '').toLowerCase());
       return haystack.some((v) => v.includes(q));
     });
   }
   // 排序
   list = [...list].sort((a, b) => {
-    if (state.sort === 'name') return String(a.title).localeCompare(String(b.title), 'zh-Hans-CN');
-    if (state.sort === 'created') return b.createdAt - a.createdAt;
-    return b.updatedAt - a.updatedAt; // 默认最近更新
+    const byName = compareNames(a.title, b.title);
+    const byId = String(a.id).localeCompare(String(b.id));
+    if (state.sort === 'name') return byName || byId;
+    const field = state.sort === 'created' ? 'createdAt' : 'updatedAt';
+    return entryTime(b, field) - entryTime(a, field) || byName || byId;
   });
 
   // 无数据时禁用批量操作入口
@@ -381,6 +448,8 @@ function renderGrid() {
 
   const grid = $('#grid');
   grid.innerHTML = list.map(cardHTML).join('');
+  $('#entry-count').textContent = `${list.length} 条记录`;
+  renderChips();
 
   const empty = $('#empty');
   if (list.length === 0) {
@@ -427,8 +496,7 @@ $('#grid').addEventListener('click', async (ev) => {
 
   try {
     if (act === 'star') {
-      entry.favorite = !entry.favorite;
-      const d = await api(`/api/entries/${entry.id}`, { method: 'PUT', body: JSON.stringify({ ...entry, favorite: entry.favorite }) });
+      const d = await api(`/api/entries/${entry.id}/favorite`, { method: 'PATCH', body: JSON.stringify({ favorite: !entry.favorite }) });
       const i = state.entries.findIndex((e) => e.id === entry.id);
       state.entries[i] = d.entry;
       render();
@@ -447,6 +515,8 @@ $('#grid').addEventListener('click', async (ev) => {
       const field = btn.closest('.card-field');
       const fieldObj = entry.fields[Number(field.dataset.idx)];
       await copyText(fieldObj.value, `「${fieldObj.name}」已复制`);
+    } else if (act === 'view') {
+      openEntryView(entry);
     } else if (act === 'edit') {
       openModal(entry);
     } else if (act === 'delete') {
@@ -490,6 +560,144 @@ async function copyText(text, msg) {
     ta.remove();
   }
   toast(msg, 'success');
+}
+
+// ---------------- 只读条目详情 ----------------
+let viewSecretTimers = [];
+
+function openEntryView(entry) {
+  state.viewingId = entry.id;
+  const color = catColor(entry.category);
+  $('#view-icon').innerHTML = entry.icon?.startsWith('data:')
+    ? `<img class="avatar-img" src="${esc(entry.icon)}" alt="">`
+    : `<span class="avatar-letter" style="color:${color}">${esc((entry.title || '?').trim().charAt(0))}</span>`;
+  $('#view-title').textContent = entry.title;
+  $('#view-subtitle').textContent = entry.subtitle || '';
+  $('#view-subtitle').classList.toggle('hidden', !entry.subtitle);
+  $('#view-category').textContent = entry.category;
+  $('#view-category').style.setProperty('--category-color', color);
+  $('#view-created').textContent = `创建 ${formatTimeValue(entryTime(entry, 'createdAt'))}`;
+  $('#view-updated').textContent = `更新 ${formatTimeValue(entryTime(entry, 'updatedAt'))}`;
+
+  const fields = entry.fields || [];
+  $('#view-fields').innerHTML = fields.length ? fields.map((field, idx) => {
+    if (field.type === 'divider') {
+      return `<div class="view-divider">${field.name ? `<span>${esc(field.name)}</span>` : ''}</div>`;
+    }
+    const value = String(field.value ?? '');
+    const secret = field.type === 'password' || isSecretField(field.name);
+    const link = field.type === 'url' && /^https?:\/\//i.test(value);
+    const content = secret
+      ? '<code class="view-value secret">••••••••••</code>'
+      : link ? `<a class="view-value link" href="${esc(value)}" target="_blank" rel="noopener noreferrer">${esc(value)}</a>`
+        : `<span class="view-value">${esc(value) || '—'}</span>`;
+    return `<div class="view-field" data-idx="${idx}">
+      <span class="view-label">${esc(field.name)}</span>
+      ${content}
+      <div class="view-field-actions">
+        ${secret ? `<button type="button" class="icon-btn sm" data-act="view-eye" title="显示密码" aria-label="显示密码">${ICONS.eye}</button>` : ''}
+        ${value ? `<button type="button" class="icon-btn sm" data-act="view-copy" title="复制${esc(field.name)}" aria-label="复制${esc(field.name)}">${ICONS.copy}</button>` : ''}
+      </div>
+    </div>`;
+  }).join('') : '<p class="view-empty">暂无字段</p>';
+
+  const atts = entry.attachments || [];
+  $('#view-attachments-section').classList.toggle('hidden', !atts.length);
+  $('#view-attachments').innerHTML = atts.map((att) => `<div class="view-attachment" data-id="${esc(att.id)}">
+    <span class="attach-icon">${ICONS.paperclip}</span>
+    <span class="attach-name" title="${esc(att.name)}">${esc(att.name)}</span>
+    <span class="attach-size">${fmtSize(att.size)}</span>
+    ${isPreviewable(att.mime) ? `<button type="button" class="icon-btn sm" data-act="view-preview" title="预览附件" aria-label="预览附件">${ICONS.eye}</button>` : ''}
+    <button type="button" class="icon-btn sm" data-act="view-download" title="下载附件" aria-label="下载附件">${ICONS.download}</button>
+  </div>`).join('');
+
+  $('#view-modal').classList.remove('hidden');
+  document.body.classList.add('modal-open');
+  $('#view-close').focus();
+}
+
+function closeEntryView(restoreFocus = true) {
+  const id = state.viewingId;
+  viewSecretTimers.forEach(clearTimeout);
+  viewSecretTimers = [];
+  $('#view-modal').classList.add('hidden');
+  $('#view-fields').innerHTML = '';
+  $('#view-attachments').innerHTML = '';
+  $('#view-icon').innerHTML = '';
+  $('#view-title').textContent = '';
+  $('#view-subtitle').textContent = '';
+  $('#view-category').textContent = '';
+  $('#view-created').textContent = '';
+  $('#view-updated').textContent = '';
+  state.viewingId = null;
+  if ($('#modal').classList.contains('hidden') && $('#preview-modal').classList.contains('hidden') && $('#settings-modal').classList.contains('hidden')) {
+    document.body.classList.remove('modal-open');
+  }
+  if (restoreFocus) {
+    [...document.querySelectorAll('#grid .card')].find((card) => card.dataset.id === id)
+      ?.querySelector('[data-act="view"]')?.focus();
+  }
+}
+
+function bindEntryView() {
+  $('#view-close').addEventListener('click', () => closeEntryView());
+  $('#view-done').addEventListener('click', () => closeEntryView());
+  bindBackdropClose('#view-modal', () => closeEntryView());
+  $('#view-edit').addEventListener('click', () => {
+    const entry = state.entries.find((item) => item.id === state.viewingId);
+    closeEntryView(false);
+    if (entry) openModal(entry);
+  });
+  $('#view-fields').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    const field = btn.closest('.view-field');
+    const entry = state.entries.find((item) => item.id === state.viewingId);
+    const item = entry?.fields[Number(field.dataset.idx)];
+    if (!item) return;
+    if (btn.dataset.act === 'view-copy') {
+      await copyText(item.value, `「${item.name}」已复制`);
+    } else if (btn.dataset.act === 'view-eye') {
+      const value = field.querySelector('.view-value');
+      const revealed = !value.classList.contains('secret');
+      value.classList.toggle('secret', revealed);
+      value.textContent = revealed ? '••••••••••' : String(item.value ?? '');
+      btn.title = revealed ? '显示密码' : '隐藏密码';
+      btn.setAttribute('aria-label', btn.title);
+      if (!revealed) {
+        const timer = setTimeout(() => {
+          value.classList.add('secret');
+          value.textContent = '••••••••••';
+          btn.title = '显示密码';
+          btn.setAttribute('aria-label', btn.title);
+        }, 6000);
+        viewSecretTimers.push(timer);
+      }
+    }
+  });
+  $('#view-attachments').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    const entry = state.entries.find((item) => item.id === state.viewingId);
+    const att = entry?.attachments?.find((item) => item.id === btn.closest('.view-attachment').dataset.id);
+    if (!att) return;
+    try {
+      const response = await fetch(`/api/attachments/${att.id}`);
+      if (!response.ok) return toast('附件读取失败', 'error');
+      const blob = await response.blob();
+      if (!state.unlocked || state.viewingId !== entry.id) return;
+      const url = URL.createObjectURL(blob);
+      if (btn.dataset.act === 'view-preview') {
+        openPreview({ id: att.id, url, name: att.name, size: att.size, mime: att.mime });
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = att.name;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+    } catch { toast('附件读取失败', 'error'); }
+  });
 }
 
 // ---------------- 弹窗遮罩关闭（防拖选误关） ----------------
@@ -947,18 +1155,22 @@ function generatePassword(len = 18) {
   return arr.join('');
 }
 
+const OBVIOUS_PASSWORDS = new Set([
+  'password', 'password123', 'password12345', 'password123456', '123456', '123456789',
+  '123456789012', 'qwerty123', 'qwerty123456', 'admin123', 'admin12345678',
+  'letmein123456', 'iloveyou12345',
+]);
+
+function isObviousPassword(password) {
+  return OBVIOUS_PASSWORDS.has(password.toLowerCase()) || /^(.)\1{5,}$/u.test(password);
+}
+
 function passwordStrength(pw) {
   if (pw.length === 0) return null;
-  let score = 0;
-  if (pw.length >= 8) score++;
-  if (pw.length >= 12) score++;
-  if (pw.length >= 16) score++;
-  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
-  if (/\d/.test(pw)) score++;
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  if (score <= 2) return { label: '弱', color: 'var(--danger)', pct: 28 };
-  if (score <= 4) return { label: '中', color: '#f59e0b', pct: 60 };
-  return { label: '强', color: 'var(--ok)', pct: 100 };
+  const length = [...pw].length;
+  if (length < 8 || isObviousPassword(pw)) return { label: '长度不足或过于简单', color: 'var(--danger)', pct: 28 };
+  if (length < 15) return { label: '可用，建议 15 位以上', color: '#c77b00', pct: 60 };
+  return { label: '长度较好，请确保独一无二', color: 'var(--ok)', pct: 100 };
 }
 
 function renderStrength(pw) {
@@ -981,10 +1193,10 @@ function bindEvents() {
     ev.preventDefault();
     const pw = $('#setup-pw').value;
     const pw2 = $('#setup-pw2').value;
-    if (pw.length < 8) return toast('主密码至少需要 8 位', 'error');
+    if ([...pw].length < 8) return toast('主密码至少需要 8 位，建议 15 位以上', 'error');
     if (pw !== pw2) return toast('两次输入的主密码不一致', 'error');
     const s = passwordStrength(pw);
-    if (s && s.label === '弱') return toast('主密码太弱，请至少包含字母和数字，长度 12 位以上', 'error');
+    if (s && s.pct < 60) return toast('主密码过于简单，请换一个独特的密码短语', 'error');
     try {
       await api('/api/setup', { method: 'POST', body: JSON.stringify({ password: pw }) });
       state.setup = true;
@@ -1032,6 +1244,7 @@ function bindEvents() {
   $('#lock-now-btn').addEventListener('click', async () => {
     try { await fetch('/api/lock', { method: 'POST' }); } catch { /* 忽略 */ }
     showLock();
+    localStorage.setItem(LOCK_KEY, String(Date.now()));
   });
   $('#theme-btn').addEventListener('click', () => {
     const mode = currentThemeMode();
@@ -1092,7 +1305,11 @@ function bindEvents() {
   $('#export-btn').addEventListener('click', async () => {
     try {
       const r = await fetch('/api/export');
-      if (!r.ok) { toast('导出失败', 'error'); return; }
+      if (!r.ok) {
+        const result = await r.json().catch(() => ({}));
+        toast(result.error || '导出失败', 'error');
+        return;
+      }
       const blob = await r.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -1146,6 +1363,7 @@ function bindEvents() {
     if (ev.key === 'Escape') {
       if (state.selectMode) { exitSelectMode(); return; }
       if (!$('#preview-modal').classList.contains('hidden')) closePreview();
+      else if (!$('#view-modal').classList.contains('hidden')) closeEntryView();
       else if (!$('#modal').classList.contains('hidden')) closeModal();
       else if (!$('#settings-modal').classList.contains('hidden')) {
         if ($('#settings-menu').classList.contains('hidden')) showSettingsMenu(); // 子页先返回菜单
@@ -1170,6 +1388,20 @@ function bindEvents() {
 }
 
 // ---------------- 设置弹窗（两步验证） ----------------
+function renderConnectionSettings() {
+  const local = ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
+  $('#connection-warning').classList.toggle('hidden', location.protocol !== 'http:' || local);
+  $('#connection-status').textContent = state.secureConnection
+    ? '当前连接：HTTPS，主密码和条目传输受到加密保护。'
+    : '当前连接：HTTP。请勿通过公网访问；同一网络中的其他人可能截获主密码和条目内容。';
+  const toggle = $('#https-required');
+  toggle.checked = state.httpsRequired;
+  toggle.disabled = !state.secureConnection;
+  $('#connection-guidance').textContent = state.secureConnection
+    ? '开启后，HTTP 请求会被拒绝。请确认反向代理已配置证书，且直接访问 3000 端口的入口已关闭。'
+    : '请先配置 HTTPS 反向代理，再从 HTTPS 地址打开 Keystone。此开关不会自动申请证书。';
+}
+
 function renderTotpSection() {
   $('#totp-enable-btn').classList.toggle('hidden', state.totpEnabled);
   $('#totp-on').classList.toggle('hidden', !state.totpEnabled);
@@ -1210,6 +1442,7 @@ function openSettings(section) {
   renderCatList();
   renderAboutStats();
   $('#autolock-select').value = String(state.autoLockMinutes); // 同步当前自动锁定时长
+  renderConnectionSettings();
   showSettingsMenu();
   if (section) openSettingsSection(section);
   $('#settings-modal').classList.remove('hidden');
@@ -1236,7 +1469,7 @@ function closeSettings() {
 /** 显示设置菜单，隐藏所有子页 */
 function showSettingsMenu() {
   $('#settings-menu').classList.remove('hidden');
-  for (const id of ['settings-cats', 'settings-password', 'settings-totp', 'settings-autolock', 'settings-about', 'settings-backup']) {
+  for (const id of ['settings-cats', 'settings-password', 'settings-totp', 'settings-autolock', 'settings-connection', 'settings-about', 'settings-backup', 'settings-health']) {
     $('#' + id).classList.add('hidden');
   }
 }
@@ -1246,6 +1479,61 @@ function openSettingsSection(name) {
   if (typeof name !== 'string' || !name) return; // 防误传（如事件对象）
   $('#settings-menu').classList.add('hidden');
   $('#settings-' + name).classList.remove('hidden');
+  if (name === 'backup') renderBackupStatus();
+  if (name === 'health') renderPasswordHealth();
+}
+
+function passwordHealth(entries) {
+  const items = [];
+  const owners = new Map();
+  for (const entry of entries) {
+    for (const field of entry.fields || []) {
+      if (field.type !== 'password' && !/(密码|口令|password|passwd)/i.test(field.name)) continue;
+      const value = String(field.value ?? '');
+      if (!value) continue;
+      items.push({ entry, value });
+      owners.set(value, (owners.get(value) || 0) + 1);
+    }
+  }
+  const issues = new Map();
+  for (const { entry, value } of items) {
+    const reused = owners.get(value) > 1;
+    const weak = [...value].length < 12 || isObviousPassword(value);
+    if (!reused && !weak) continue;
+    if (!issues.has(entry.id)) issues.set(entry.id, { entry, reused: false, weak: false });
+    const issue = issues.get(entry.id);
+    issue.reused ||= reused;
+    issue.weak ||= weak;
+  }
+  return { checked: items.length, issues: [...issues.values()] };
+}
+
+function renderPasswordHealth() {
+  const { checked, issues } = passwordHealth(state.entries);
+  $('#health-summary').textContent = `已检查 ${checked} 个密码，${issues.length} 条记录需要处理`;
+  $('#health-list').innerHTML = issues.length ? issues.map(({ entry, reused, weak }) => `
+    <button type="button" class="health-row" data-id="${esc(entry.id)}">
+      <span class="health-title">${esc(entry.title)}</span>
+      <span class="health-reason">${[reused && '重复使用', weak && '过短或常见'].filter(Boolean).join(' · ')}</span>
+    </button>`).join('') : '<p class="settings-empty">没有发现重复或明显薄弱的密码</p>';
+}
+
+async function renderBackupStatus() {
+  const line = $('#backup-status');
+  line.textContent = '正在检查备份…';
+  try {
+    const status = await api('/api/backup/status');
+    if ($('#settings-backup').classList.contains('hidden')) return;
+    const date = status.lastSuccessfulAt ? new Date(status.lastSuccessfulAt).toLocaleString('zh-CN') : '暂无';
+    line.textContent = status.missingAttachments
+      ? `有 ${status.missingAttachments} 个附件缺失，请先检查数据；最近完整备份：${date}`
+      : status.lastError ? `${status.lastError}；最近完整备份：${date}`
+        : `最近完整备份：${date}`;
+    line.classList.toggle('error', !!(status.missingAttachments || status.lastError));
+  } catch {
+    line.textContent = '暂时无法读取备份状态';
+    line.classList.add('error');
+  }
 }
 
 // ---------------- 分类管理 ----------------
@@ -1359,6 +1647,25 @@ function bindSettingsEvents() {
   });
   // 子页 → 返回菜单
   $$('.settings-back').forEach((b) => b.addEventListener('click', showSettingsMenu));
+  $('#health-list').addEventListener('click', (ev) => {
+    const row = ev.target.closest('.health-row');
+    const entry = state.entries.find((item) => item.id === row?.dataset.id);
+    if (!entry) return;
+    closeSettings();
+    openEntryView(entry);
+  });
+
+  $('#https-required').addEventListener('change', async (ev) => {
+    const required = ev.target.checked;
+    ev.target.disabled = true;
+    try {
+      const d = await api('/api/settings/https', { method: 'POST', body: JSON.stringify({ httpsRequired: required }) });
+      state.httpsRequired = d.httpsRequired;
+      state.secureConnection = d.secureConnection;
+      toast(required ? '已启用仅允许 HTTPS' : '已允许 HTTP 访问', 'success');
+    } catch { /* api() 已提示 */ }
+    renderConnectionSettings();
+  });
 
   // 开启：第一步 生成密钥
   $('#totp-enable-btn').addEventListener('click', async () => {
@@ -1424,7 +1731,7 @@ function bindSettingsEvents() {
     const newPw = $('#pw-new').value;
     const newPw2 = $('#pw-new2').value;
     if (!oldPw) return toast('请输入当前主密码', 'error');
-    if (newPw.length < 8) return toast('新主密码至少需要 8 位', 'error');
+    if ([...newPw].length < 8) return toast('新主密码至少需要 8 位，建议 15 位以上', 'error');
     if (newPw !== newPw2) return toast('两次输入的新主密码不一致', 'error');
     try {
       await api('/api/password', { method: 'POST', body: JSON.stringify({ oldPassword: oldPw, newPassword: newPw }) });
@@ -1484,7 +1791,7 @@ function closePreview() {
   if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
   previewAtt = null;
   // 条目弹窗还开着时保留滚动锁定
-  if ($('#modal').classList.contains('hidden') && $('#settings-modal').classList.contains('hidden')) {
+  if ($('#modal').classList.contains('hidden') && $('#settings-modal').classList.contains('hidden') && $('#view-modal').classList.contains('hidden')) {
     document.body.classList.remove('modal-open');
   }
 }
@@ -1610,12 +1917,19 @@ function positionBatchBar() {
   $('#batch-bar').style.top = (topbar ? topbar.offsetHeight : 0) + 'px'; // 贴在顶栏正下方
 }
 
+function setBatchButtonLabel(label) {
+  const button = $('#batch-btn');
+  button.querySelector('.batch-label').textContent = label;
+  button.title = label;
+  button.setAttribute('aria-label', label);
+}
+
 function enterSelectMode() {
   state.selectMode = true;
   state.selected.clear();
   positionBatchBar();
   $('#batch-bar').classList.remove('hidden');
-  $('#batch-btn').textContent = '取消多选';
+  setBatchButtonLabel('取消多选');
   renderGrid();
   updateBatchBar();
 }
@@ -1625,7 +1939,7 @@ function exitSelectMode() {
   state.selected.clear();
   $('#batch-bar').classList.add('hidden');
   $('#batch-cat-wrap').classList.add('hidden');
-  $('#batch-btn').textContent = '批量操作';
+  setBatchButtonLabel('批量操作');
   renderGrid();
 }
 
@@ -1741,8 +2055,9 @@ function bindAutolockEvents() {
 }
 
 // ---------------- 闲置自动锁定 ----------------
-function resetIdle() {
+function resetIdle(record = true) {
   clearTimeout(state.idleTimer);
+  if (record && state.unlocked) localStorage.setItem(ACTIVITY_KEY, String(Date.now()));
   state.idleTimer = setTimeout(lockNow, state.autoLockMinutes * 60 * 1000);
 }
 
@@ -1750,15 +2065,28 @@ function startIdleWatch() {
   const EVENTS = ['click', 'keydown', 'touchstart', 'scroll'];
   EVENTS.forEach((e) => document.addEventListener(e, () => {
     const now = Date.now();
-    if (now - state.lastIdleReset > 30_000) { state.lastIdleReset = now; resetIdle(); }
+    if (state.unlocked && now - state.lastIdleReset > 30_000) {
+      state.lastIdleReset = now;
+      resetIdle();
+      fetch('/api/activity', { method: 'POST' }).catch(() => {});
+    }
   }, { passive: true }));
-  resetIdle();
+  window.addEventListener('storage', (ev) => {
+    if (ev.key === ACTIVITY_KEY && state.unlocked) resetIdle(false);
+    if (ev.key === LOCK_KEY && state.unlocked) showLock('另一标签页已锁定');
+  });
 }
 
 async function lockNow() {
   if (!state.unlocked) return;
+  const last = Number(localStorage.getItem(ACTIVITY_KEY)) || 0;
+  if (Date.now() - last < state.autoLockMinutes * 60_000 - 1000) {
+    resetIdle(false);
+    return;
+  }
   try { await fetch('/api/lock', { method: 'POST' }); } catch { /* 忽略 */ }
   showLock('已闲置超时，自动锁定');
+  localStorage.setItem(LOCK_KEY, String(Date.now()));
 }
 
 // 会话状态轮询（服务端过期时兜底锁定）
@@ -1774,8 +2102,10 @@ function startPolling() {
 // ---------------- 启动 ----------------
 (async function init() {
   applyTheme();
+  renderConnectionSettings();
   bindEvents();
   bindSettingsEvents();
+  bindEntryView();
   bindCategoryEvents();
   bindAttachEvents();
   bindFieldsEvents();
@@ -1789,6 +2119,9 @@ function startPolling() {
     state.setup = st.setup;
     state.autoLockMinutes = st.autoLockMinutes || 30;
     state.totpEnabled = !!st.totpEnabled;
+    state.httpsRequired = !!st.httpsRequired;
+    state.secureConnection = !!st.secureConnection;
+    renderConnectionSettings();
     if (!st.setup) {
       showView('setup');
       setTimeout(() => $('#setup-pw').focus(), 60);

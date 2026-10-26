@@ -1,11 +1,11 @@
 {
   "name": "keystone",
   "version": "1.0.0",
-  "description": "Keystone - 极简个人密码管理器，Docker 一键部署，零知识加密",
+  "description": "Keystone - 自托管个人密码管理器，Docker 一键部署，服务端加密",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node tests/run-flow.mjs && node tests/reset-token.mjs",
+    "test": "node tests/run-flow.mjs && node tests/master-password-min.mjs && node tests/reset-token.mjs && node tests/https.mjs && node tests/rekey-recovery.mjs && node tests/import-recovery.mjs",
     "test:static": "node tests/html-check.mjs && node tests/runtime-check.mjs",
     "test:ui": "node tests/ui-test.mjs"
   },

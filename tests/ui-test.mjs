@@ -96,6 +96,7 @@ const check = (name, cond, extra = '') => { cond ? pass++ : fail++; console.log(
 
 // ---------- 1. 初始化界面 ----------
 check('显示创建界面', await evaluate(`!document.querySelector('#view-setup').classList.contains('hidden')`));
+check('8 位主密码可用且提示建议加长', await evaluate(`passwordStrength('Abc12345')?.pct === 60 && passwordStrength('Abc1234')?.pct === 28`));
 await screenshot('1-创建界面');
 
 // ---------- 2. 填写主密码创建 ----------
@@ -127,6 +128,7 @@ async function addEntry(title, category, account, password, url, note, fav) {
   await evaluate(`(() => {
     const set = (sel, v) => { const el = document.querySelector(sel); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
     set('#m-title', ${JSON.stringify(title)});
+    if (${JSON.stringify(title)} === '微信') set('#m-subtitle', '个人主号');
     const cat = document.querySelector('#m-cat');
     cat.value = ${JSON.stringify(category)};
     cat.dispatchEvent(new Event('change', { bubbles: true }));
@@ -134,6 +136,12 @@ async function addEntry(title, category, account, password, url, note, fav) {
     const rows = document.querySelectorAll('#fields-list .field-block');
     if (rows[0]) rows[0].querySelector('.f-value').value = ${JSON.stringify(account)};
     if (rows[1]) rows[1].querySelector('.f-value').value = ${JSON.stringify(password)};
+    if (${JSON.stringify(Boolean(note))}) {
+      document.querySelector('#fields-add-btn').click();
+      const extra = document.querySelector('#fields-list .field-block:last-child');
+      extra.querySelector('.f-name').value = '备注';
+      extra.querySelector('.f-value').value = ${JSON.stringify(note)};
+    }
     document.querySelector('#entry-form').requestSubmit();
     return true;
   })()`);
@@ -151,17 +159,162 @@ check('新增条目 3', (await addEntry('QQ 邮箱', '邮箱', 'user@qq.com', 'M
 
 // 卡片内容验证
 check('卡片标题正确', await evaluate(`Boolean(${cardExpr('微信')})`));
+check('健康检查只标记重复和薄弱密码', await evaluate(`(() => {
+  const entries = [
+    { id: 'a', title: '甲', fields: [{ name: '密码', type: 'password', value: 'shared-long-password' }] },
+    { id: 'b', title: '乙', fields: [{ name: '密码', type: 'password', value: 'shared-long-password' }] },
+    { id: 'c', title: '丙', fields: [{ name: '密码', type: 'password', value: 'short' }] },
+    { id: 'd', title: '丁', fields: [{ name: '密码', type: 'password', value: 'unique-long-password' }] },
+    { id: 'e', title: '同一条目两个账号', fields: [
+      { name: '密码1', type: 'password', value: 'same-entry-password' },
+      { name: '密码2', type: 'password', value: 'same-entry-password' },
+    ] },
+    { id: 'f', title: 'PIN 不按网站密码计算', fields: [{ name: 'PIN', type: 'number', value: '123456' }] },
+  ];
+  const result = passwordHealth(entries);
+  return result.checked === 6 && result.issues.length === 4 &&
+    result.issues.find((item) => item.entry.id === 'a')?.reused &&
+    result.issues.find((item) => item.entry.id === 'c')?.weak &&
+    result.issues.find((item) => item.entry.id === 'e')?.reused;
+})()`));
 check('卡片分类徽标正确', await evaluate(`${cardExpr('微信')}?.querySelector('.badge')?.textContent === '社交'`));
+check('卡片保留最上方分组线并忽略空尾组', await evaluate(`(() => {
+  const html = cardHTML({
+    id: 'divider-check', title: '分组测试', category: '社交',
+    fields: [
+      { name: 'QQ1', type: 'divider' },
+      { name: '账号', type: 'text', value: 'first', pinned: true },
+      { name: 'QQ2', type: 'divider' },
+      { name: '账号', type: 'text', value: 'second', pinned: true },
+      { name: 'QQ3', type: 'divider' },
+    ],
+  });
+  const card = new DOMParser().parseFromString(html, 'text/html');
+  return [...card.querySelectorAll('.field-divider')].map((el) => el.textContent).join('|') === 'QQ1|QQ2';
+})()`));
+check('分类与总数正确', await evaluate(`document.querySelector('.chip[data-cat="全部"] .chip-count')?.textContent === '3' && document.querySelector('#entry-count')?.textContent === '3 条记录'`));
+check('宽桌面三列卡片', await evaluate(`(() => {
+  const cards = [...document.querySelectorAll('.card')].map((card) => card.getBoundingClientRect());
+  return cards.length === 3 && cards.every((card) => Math.abs(card.top - cards[0].top) < 2) && cards[0].left < cards[1].left && cards[1].left < cards[2].left;
+})()`));
+check('卡片说明文字不再过小', await evaluate(`(() => {
+  const css = (selector) => getComputedStyle(document.querySelector(selector));
+  return parseFloat(css('body').fontSize) >= 16 && parseFloat(css('.chip').fontSize) >= 15 &&
+    parseFloat(css('.sort-select').fontSize) >= 14 && parseFloat(css('.card-sub').fontSize) >= 14 &&
+    parseFloat(css('.card-field .f-name').fontSize) >= 14 && parseFloat(css('.card-time').fontSize) >= 13 &&
+    parseFloat(css('.card-time').fontWeight) <= 500;
+})()`));
+check('分类、时间和操作按钮位于同一行', await evaluate(`(() => {
+  const card = document.querySelector('.card');
+  const parts = ['.badge', '.card-time', '.card-actions'].map((selector) => card.querySelector(selector).getBoundingClientRect());
+  const centers = parts.map((part) => part.top + part.height / 2);
+  return Math.max(...centers) - Math.min(...centers) < 2 &&
+    parts[0].right < parts[1].left && parts[1].right < parts[2].left;
+})()`));
+check('同排卡片等高', await evaluate(`(() => {
+  const cards = [...document.querySelectorAll('.card')];
+  const spacer = document.createElement('div');
+  spacer.style.height = '100px';
+  spacer.style.flex = 'none';
+  cards[0].querySelector('.card-fields').append(spacer);
+  const heights = cards.map((card) => card.getBoundingClientRect().height);
+  spacer.remove();
+  return heights.every((height) => Math.abs(height - heights[0]) < 2);
+})()`));
+await send('Emulation.setDeviceMetricsOverride', { width: 1709, height: 900, deviceScaleFactor: 1, mobile: false });
+await sleep(200);
+check('宽屏充分利用两侧空间', await evaluate(`(() => {
+  const layout = document.querySelector('.vault-layout').getBoundingClientRect();
+  const cards = [...document.querySelectorAll('.card')].map((card) => card.getBoundingClientRect());
+  return layout.width >= 1550 && cards.length === 3 && cards.every((card) => card.width >= 400);
+})()`));
+await send('Emulation.clearDeviceMetricsOverride');
+await sleep(200);
+await send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 900, deviceScaleFactor: 1, mobile: false });
+await sleep(200);
+check('窄桌面回退两列', await evaluate(`(() => {
+  const cards = [...document.querySelectorAll('.card')];
+  const spacer = document.createElement('div');
+  spacer.style.height = '120px';
+  spacer.style.flex = 'none';
+  cards[0].querySelector('.card-fields').append(spacer);
+  const bounds = cards.map((card) => card.getBoundingClientRect());
+  spacer.remove();
+  return cards.length === 3 && Math.abs(bounds[0].top - bounds[1].top) < 2 &&
+    bounds[2].top > bounds[0].top && Math.abs(bounds[0].height - bounds[1].height) < 2 &&
+    bounds[2].height < bounds[0].height - 80;
+})()`));
+await send('Emulation.clearDeviceMetricsOverride');
+await sleep(200);
+check('亮色分类选中态明显', await evaluate(`(() => {
+  const style = getComputedStyle(document.querySelector('.chip.active'));
+  return style.backgroundColor === 'rgb(217, 222, 251)' && style.boxShadow.includes('inset') && style.color === 'rgb(61, 66, 173)';
+})()`));
 check('账号字段有复制按钮', await evaluate(`${cardExpr('微信')}?.querySelector('.card-field button[data-act="f-copy"]') !== null`));
 check('密码默认掩码', await evaluate(`${cardExpr('微信')}?.querySelector('.card-field .f-value.secret')?.textContent.includes('•')`));
 await screenshot('3-条目列表亮色');
+
+check('测试附件上传成功', await evaluate(`(async () => {
+  const form = new FormData();
+  form.append('file', new File(['detail-preview-ok'], '说明.txt', { type: 'text/plain' }));
+  const id = ${cardExpr('微信')}.dataset.id;
+  const response = await fetch('/api/entries/' + id + '/attachments', { method: 'POST', body: form });
+  return response.status === 201;
+})()`));
+await send('Page.reload');
+await sleep(1200);
+
+// ---------- 只读详情 ----------
+check('列表提供查看按钮', await evaluate(`${cardExpr('微信')}?.querySelector('button[data-act="view"]') !== null`));
+await evaluate(`${cardExpr('微信')}.querySelector('button[data-act="view"]').click()`);
+await sleep(300);
+check('查看详情显示全部字段', await evaluate(`!document.querySelector('#view-modal').classList.contains('hidden') && document.querySelector('#view-title').textContent === '微信' && document.querySelectorAll('#view-fields .view-field').length === 3 && document.querySelector('#view-fields').textContent.includes('备用手机号')`));
+check('详情密码默认隐藏', await evaluate(`document.querySelector('#view-fields .view-field[data-idx="1"] .view-value.secret')?.textContent.includes('•')`));
+check('详情显示附件', await evaluate(`document.querySelector('#view-attachments .attach-name')?.textContent === '说明.txt'`));
+await screenshot('3b-只读条目详情');
+await evaluate(`document.querySelector('#view-attachments [data-act="view-preview"]').click()`);
+await sleep(300);
+check('详情可预览附件', await evaluate(`!document.querySelector('#preview-modal').classList.contains('hidden') && document.querySelector('#preview-body').textContent.includes('detail-preview-ok')`));
+await evaluate(`document.querySelector('#preview-close').click()`);
+await evaluate(`document.querySelector('#view-fields .view-field[data-idx="1"] [data-act="view-eye"]').click()`);
+check('详情可临时显示密码', await evaluate(`document.querySelector('#view-fields .view-field[data-idx="1"] .view-value')?.textContent === 'wxP@ss!2024'`));
+await evaluate(`document.querySelector('#view-done').click()`);
+check('关闭详情清除明文', await evaluate(`document.querySelector('#view-modal').classList.contains('hidden') && document.querySelector('#view-fields').textContent === '' && document.querySelector('#view-title').textContent === ''`));
+await evaluate(`${cardExpr('微信')}.querySelector('button[data-act="view"]').click()`);
+await evaluate(`document.querySelector('#view-edit').click()`);
+check('详情可进入编辑', await evaluate(`document.querySelector('#view-modal').classList.contains('hidden') && !document.querySelector('#modal').classList.contains('hidden') && document.querySelector('#m-title').value === '微信'`));
+await evaluate(`document.querySelector('#modal-cancel').click()`);
 
 // ---------- 4. 搜索过滤 ----------
 await evaluate(`(() => { const s = document.querySelector('#search'); s.value = '招商'; s.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
 await sleep(300);
 check('搜索"招商"只剩 1 条', await evaluate(`document.querySelectorAll('.card').length === 1`));
+await evaluate(`(() => { const s = document.querySelector('#search'); s.value = '社交'; s.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await sleep(200);
+check('搜索分类可找到条目', await evaluate(`document.querySelectorAll('.card').length === 1 && document.querySelector('.card h3')?.textContent === '微信'`));
 await evaluate(`(() => { const s = document.querySelector('#search'); s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
 await sleep(300);
+
+await evaluate(`document.querySelector('#settings-btn').click()`);
+await evaluate(`document.querySelector('[data-open="connection"]').click()`);
+check('HTTP 设置页显示风险和禁用 HTTPS 开关', await evaluate(`document.querySelector('#connection-status').textContent.includes('HTTP') && document.querySelector('#https-required').disabled`));
+await evaluate(`document.querySelector('#settings-close').click()`);
+await evaluate(`document.querySelector('#settings-btn').click()`);
+await evaluate(`document.querySelector('[data-open="backup"]').click()`);
+await sleep(150);
+check('备份页显示最近备份状态', await evaluate(`document.querySelector('#backup-status').textContent.includes('最近完整备份')`));
+await evaluate(`document.querySelector('.settings-back').click()`);
+await evaluate(`document.querySelector('[data-open="health"]').click()`);
+check('密码健康页只展示风险条目不泄露原文', await evaluate(`(() => {
+  const section = document.querySelector('#settings-health');
+  return !section.classList.contains('hidden') && document.querySelector('#health-summary').textContent.includes('3 个密码') &&
+    document.querySelectorAll('#health-list .health-row').length === 1 &&
+    !document.querySelector('#health-list').textContent.includes('wxP@ss!2024');
+})()`));
+await screenshot('3c-密码健康');
+await evaluate(`document.querySelector('#health-list .health-row').click()`);
+check('健康条目可打开只读详情', await evaluate(`document.querySelector('#settings-modal').classList.contains('hidden') && !document.querySelector('#view-modal').classList.contains('hidden')`));
+await evaluate(`document.querySelector('#view-done').click()`);
 
 // ---------- 5. 分类筛选 ----------
 await evaluate(`[...document.querySelectorAll('.chip')].find(c => c.dataset.cat === '银行').click()`);
@@ -179,7 +332,27 @@ check('眼睛切换显示明文', await evaluate(`${cardExpr('微信')}.querySel
 await evaluate(`document.querySelector('#theme-btn').click()`);
 await sleep(400);
 check('切换到暗色主题', await evaluate(`document.documentElement.dataset.theme === 'dark'`));
+check('深色次级文字对比度达标', await evaluate(`(() => {
+  const css = getComputedStyle(document.documentElement);
+  const lightness = (name) => {
+    const hex = css.getPropertyValue(name).trim().slice(1);
+    const values = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((v) => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    return values[0] * 0.2126 + values[1] * 0.7152 + values[2] * 0.0722;
+  };
+  const text = lightness('--text-3');
+  return ['--bg', '--surface', '--surface-2'].every((name) => (text + 0.05) / (lightness(name) + 0.05) >= 4.5);
+})()`));
 await screenshot('4-暗色主题');
+await evaluate(`document.querySelector('#settings-btn').click()`);
+await evaluate(`document.querySelector('[data-open="connection"]').click()`);
+await sleep(300);
+await screenshot('4b-深色设置');
+await evaluate(`document.querySelector('#settings-close').click()`);
+await evaluate(`${cardExpr('QQ 邮箱')}.querySelector('button[data-act="edit"]').click()`);
+await sleep(300);
+await screenshot('4c-深色编辑');
+await evaluate(`document.querySelector('#modal-cancel').click()`);
 
 // ---------- 8. 收藏筛选 ----------
 await evaluate(`[...document.querySelectorAll('.chip')].find(c => c.dataset.cat === '收藏').click()`);
@@ -196,6 +369,17 @@ await evaluate(`(() => { const t = document.querySelector('#m-title'); t.value =
 await sleep(600);
 check('编辑后标题更新', await evaluate(`Boolean(${cardExpr('微信（主号）')})`));
 
+const setSort = async (mode) => {
+  await evaluate(`(() => { const select = document.querySelector('#sort-select'); select.value = ${JSON.stringify(mode)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await sleep(100);
+  return evaluate(`[...document.querySelectorAll('.card h3')].map((el) => el.textContent).join('|')`);
+};
+check('按名称排序：英文先于中文，中文按拼音', (await setSort('name')) === 'QQ 邮箱|微信（主号）|招商银行储蓄卡');
+check('按创建时间排序：最新创建在前', (await setSort('created')) === 'QQ 邮箱|招商银行储蓄卡|微信（主号）');
+check('创建时间在卡片中可核对', await evaluate(`document.querySelector('.card-time')?.textContent.startsWith('20') && document.querySelector('.card-time')?.title === '创建时间'`));
+check('按更新时间排序：刚编辑的在前', (await setSort('updated')) === '微信（主号）|QQ 邮箱|招商银行储蓄卡');
+check('更新时间在卡片中可核对', await evaluate(`document.querySelector('.card-time')?.textContent.startsWith('20') && document.querySelector('.card-time')?.title === '最近更新'`));
+
 // ---------- 10. 删除（两步确认） ----------
 await evaluate(`${cardExpr('微信（主号）')}.querySelector('button[data-act="delete"]').click()`);
 await sleep(200);
@@ -205,9 +389,11 @@ await sleep(600);
 check('确认后删除成功', await evaluate(`document.querySelectorAll('.card').length === 2`));
 
 // ---------- 11. 锁定 ----------
+await evaluate(`${cardExpr('QQ 邮箱')}.querySelector('[data-act="view"]').click()`);
 await evaluate(`document.querySelector('#lock-now-btn').click()`);
 await sleep(500);
 check('点击锁定回到锁定界面', await evaluate(`!document.querySelector('#view-lock').classList.contains('hidden')`));
+check('锁定时关闭详情并清除字段', await evaluate(`document.querySelector('#view-modal').classList.contains('hidden') && document.querySelector('#view-fields').textContent === ''`));
 await screenshot('5-锁定界面');
 
 // ---------- 12. 错误密码 ----------
@@ -222,12 +408,52 @@ await sleep(2500);
 check('正确密码解锁回到主界面', await evaluate(`!document.querySelector('#view-main').classList.contains('hidden')`));
 check('解锁后数据仍在', await evaluate(`document.querySelectorAll('.card').length === 2`));
 
+await evaluate(`${cardExpr('QQ 邮箱')}.querySelector('button[data-act="edit"]').click()`);
+await evaluate(`document.querySelector('#lock-now-btn').click()`);
+await sleep(250);
+check('锁定时关闭编辑并清除表单与卡片', await evaluate(`document.querySelector('#modal').classList.contains('hidden') && document.querySelector('#m-title').value === '' && document.querySelector('#fields-list').textContent === '' && !document.querySelector('#grid').textContent.includes('QQ 邮箱')`));
+await evaluate(`(() => { document.querySelector('#lock-pw').value = 'MyUI@Test2024'; document.querySelector('#lock-form').requestSubmit(); })()`);
+await sleep(2500);
+check('编辑锁定后仍可重新解锁', await evaluate(`!document.querySelector('#view-main').classList.contains('hidden')`));
+
+await evaluate(`document.querySelector('#settings-btn').click()`);
+await evaluate(`document.querySelector('[data-open="totp"]').click()`);
+await evaluate(`document.querySelector('#totp-secret').textContent = 'temporary-secret'`);
+await evaluate(`document.querySelector('#lock-now-btn').click()`);
+await sleep(250);
+check('锁定时关闭设置并清除两步密钥', await evaluate(`document.querySelector('#settings-modal').classList.contains('hidden') && document.querySelector('#totp-secret').textContent === ''`));
+await evaluate(`(() => { document.querySelector('#lock-pw').value = 'MyUI@Test2024'; document.querySelector('#lock-form').requestSubmit(); })()`);
+await sleep(2500);
+
 // ---------- 14. 移动端布局 ----------
 await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
 await sleep(400);
 check('移动端无横向页面溢出', await evaluate(`document.documentElement.scrollWidth <= window.innerWidth`));
 check('移动端条目为单列', await evaluate(`document.querySelectorAll('.card').length === 2`));
+check('移动端卡片底部保持单行', await evaluate(`(() => {
+  const foot = document.querySelector('.card-bottom');
+  const parts = ['.badge', '.card-time', '.card-actions'].map((selector) => foot.querySelector(selector).getBoundingClientRect());
+  const centers = parts.map((part) => part.top + part.height / 2);
+  return Math.max(...centers) - Math.min(...centers) < 2 && foot.scrollWidth <= foot.clientWidth;
+})()`));
+check('移动端保留主题和批量操作', await evaluate(`getComputedStyle(document.querySelector('#theme-btn')).display !== 'none' && getComputedStyle(document.querySelector('#batch-btn')).display !== 'none'`));
+check('移动端分类选中态保留背景和边框', await evaluate(`(() => {
+  const style = getComputedStyle(document.querySelector('.chip.active'));
+  return style.backgroundColor === 'rgb(41, 52, 86)' && style.borderTopColor === 'rgb(129, 140, 248)';
+})()`));
+await evaluate(`document.querySelector('#batch-btn').click()`);
+check('移动端进入多选仍显示图标', await evaluate(`document.querySelector('#batch-btn svg')?.getBoundingClientRect().width > 0 && document.querySelector('#batch-btn').getAttribute('aria-label') === '取消多选'`));
+await evaluate(`document.querySelector('#batch-btn').click()`);
+check('移动端退出多选仍显示图标', await evaluate(`document.querySelector('#batch-btn svg')?.getBoundingClientRect().width > 0 && document.querySelector('#batch-btn').getAttribute('aria-label') === '批量操作'`));
 await screenshot('7-移动端凭据列表');
+await evaluate(`${cardExpr('QQ 邮箱')}.querySelector('[data-act="view"]').click()`);
+await sleep(300);
+check('移动端详情无横向溢出', await evaluate(`document.documentElement.scrollWidth <= window.innerWidth && !document.querySelector('#view-modal').classList.contains('hidden')`));
+await screenshot('8-移动端条目详情');
+await evaluate(`document.querySelector('#view-done').click()`);
+await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 740, deviceScaleFactor: 1, mobile: true });
+await sleep(300);
+check('小屏幕无横向页面溢出', await evaluate(`document.documentElement.scrollWidth <= window.innerWidth`));
 await send('Emulation.clearDeviceMetricsOverride');
 
 // ---------- 14. 刷新页面后会话保持 ----------

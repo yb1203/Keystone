@@ -49,10 +49,15 @@ check('初始未初始化', r.data.setup === false);
 
 r = await req('/api/setup', { method: 'POST', body: JSON.stringify({ password: 'short' }) });
 check('弱密码被拒绝(400)', r.status === 400);
+r = await req('/api/setup', { method: 'POST', body: JSON.stringify({ password: 'password123456' }) });
+check('常见主密码被拒绝(400)', r.status === 400);
 
 r = await req('/api/setup', { method: 'POST', body: JSON.stringify({ password: 'MyTest@2024Pass' }) });
 check('创建 Keystone', r.status === 200 && r.data.ok, r.status);
 cookie = r.vsid;
+
+r = await req('/api/unlock', { method: 'POST', body: JSON.stringify({ password: 'x'.repeat(201) }) });
+check('过长的解锁密码直接被拒绝(400)', r.status === 400);
 
 r = await req('/api/setup', { method: 'POST', body: JSON.stringify({ password: 'x' }) });
 check('重复初始化被拒绝(409)', r.status === 409);
@@ -96,6 +101,13 @@ check('邮箱类型正确', fieldVal(e1, '注册邮箱') === 'wx@example.com' &&
 check('自定义字段(安全问题)正确', fieldVal(e1, '安全问题') === '我的小学');
 check('置顶标记正确', fieldPinned(e1, '账号') === true && fieldPinned(e1, '密码') === true && fieldPinned(e1, '网址') === false && fieldPinned(e1, '备注') === false);
 check('复制开关正确', fieldCopyable(e1, '账号') === false && fieldCopyable(e1, '密码') === true && fieldCopyable(e1, '备注') === true);
+
+r = await req(`/api/entries/${e1.id}/favorite`, { method: 'PATCH', body: JSON.stringify({ favorite: false }) }, cookie);
+check('取消收藏不改变更新时间', r.status === 200 && r.data.entry.favorite === false && r.data.entry.updatedAt === e1.updatedAt);
+r = await req(`/api/entries/${e1.id}/favorite`, { method: 'PATCH', body: JSON.stringify({ favorite: true }) }, cookie);
+check('重新收藏不改变更新时间', r.status === 200 && r.data.entry.favorite === true && r.data.entry.updatedAt === e1.updatedAt);
+r = await req(`/api/entries/${e1.id}/favorite`, { method: 'PATCH', body: JSON.stringify({ favorite: 'yes' }) }, cookie);
+check('非法收藏状态被拒绝', r.status === 400);
 
 const payload2 = { title: '招商银行储蓄卡', category: '银行', favorite: false, fields: [{ name: '卡号', type: 'number', value: '6222 0000 1234 5678' }, { name: '密码', type: 'password', value: 'Card@2024' }] };
 r = await req('/api/entries', { method: 'POST', body: JSON.stringify(payload2) }, cookie);
@@ -377,6 +389,27 @@ rr = await fetch(BASE + `/api/attachments/${att1.id}`, { headers: { Cookie: cook
 const downloaded = Buffer.from(await rr.arrayBuffer());
 check('下载成功且内容一致', rr.status === 200 && downloaded.toString('utf8') === attContent);
 check('下载为附件响应头', (rr.headers.get('content-disposition') || '').includes('attachment'));
+
+const intactBackup = await req('/api/export', {}, cookie);
+check('完整附件可导出', intactBackup.status === 200 && !!intactBackup.data.attachments?.[att1.id]);
+const missingBackup = { ...intactBackup.data, attachments: {} };
+rr = await req('/api/import', { method: 'POST', body: JSON.stringify(missingBackup) }, cookie);
+check('缺失附件的备份拒绝导入', rr.status === 400);
+rr = await req('/api/entries', {}, cookie);
+check('拒绝导入后原会话与条目保持可用', rr.status === 200 && rr.data.entries.some((entry) => entry.id === e1.id));
+if (process.env.DATA_DIR) {
+  const { rename } = await import('node:fs/promises');
+  const file = `${process.env.DATA_DIR}/attachments/${att1.id}.bin`;
+  await rename(file, file + '.hold');
+  try {
+    rr = await req('/api/export', {}, cookie);
+    check('缺失附件时拒绝生成不完整备份', rr.status === 409);
+    rr = await req('/api/backup/status', {}, cookie);
+    check('备份状态报告缺失附件', rr.status === 200 && rr.data.missingAttachments === 1);
+  } finally {
+    await rename(file + '.hold', file);
+  }
+}
 
 // 磁盘密文检查（DATA_DIR 需指向服务数据目录）
 if (process.env.DATA_DIR) {

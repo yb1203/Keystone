@@ -13,7 +13,7 @@ const el = () => ({
   value: '', checked: false, type: 'text', disabled: false, dataset: {}, style: {},
   querySelector(){ return el(); }, querySelectorAll(){ return []; },
   closest(){ return null; }, focus(){}, select(){}, click(){},
-  scrollIntoView(){}, appendChild(){}, remove(){},
+  scrollIntoView(){}, appendChild(){}, remove(){}, removeAttribute(){}, replaceChildren(){},
 });
 
 global.document = {
@@ -24,6 +24,7 @@ global.document = {
   addEventListener(){},
 };
 global.window = { addEventListener(){} };
+global.location = { protocol: 'http:', hostname: '127.0.0.1' };
 global.localStorage = { getItem(){ return null; }, setItem(){} };
 global.matchMedia = () => ({ matches: false, addEventListener(){} });
 global.FormData = class {};

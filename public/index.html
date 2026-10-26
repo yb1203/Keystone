@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <div id="connection-warning" class="connection-warning hidden" role="alert">当前通过 HTTP 访问，主密码和条目内容可能被同一网络中的其他人截获。强烈建议配置 HTTPS。</div>
 
   <!-- ======== 首次初始化 ======== -->
   <section id="view-setup" class="view auth-view hidden">
@@ -19,7 +20,7 @@
       <p class="auth-sub">设置一个主密码，它将加密所有数据。<br>主密码无法找回，请务必牢记！</p>
       <label class="field">
         <span>主密码</span>
-        <input type="password" id="setup-pw" placeholder="至少 8 位" maxlength="200" required>
+        <input type="password" id="setup-pw" placeholder="至少 8 位，建议 15 位以上" maxlength="200" required>
       </label>
       <div class="strength hidden" id="setup-strength">
         <div class="strength-bar"><i id="setup-strength-fill"></i></div>
@@ -31,7 +32,7 @@
       </label>
       <button type="submit" class="btn primary block">创建 Keystone</button>
       <button type="button" class="btn ghost block" id="setup-restore-btn">已有备份？从备份恢复</button>
-      <p class="auth-hint">🔒 数据仅加密存储在本地服务器，重启服务后自动锁定</p>
+      <p class="auth-hint">数据加密存储在本地服务器，重启服务后自动锁定</p>
     </form>
   </section>
 
@@ -51,7 +52,7 @@
       </label>
       <p class="auth-error hidden" id="lock-error"></p>
       <button type="submit" class="btn primary block" id="lock-btn">解锁</button>
-      <p class="auth-hint">🔒 主密码仅保存在你的记忆中，丢失将无法恢复数据</p>
+      <p class="auth-hint">主密码仅保存在你的记忆中，丢失将无法恢复数据</p>
     </form>
   </section>
 
@@ -81,7 +82,10 @@
         <button id="lock-now-btn" class="icon-btn" title="立即锁定">
           <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
         </button>
-        <button id="batch-btn" class="btn ghost sm">批量操作</button>
+        <button id="batch-btn" class="btn ghost sm" title="批量操作" aria-label="批量操作">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><path d="m5 6 1.5 1.5L9 4.5"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span class="batch-label">批量操作</span>
+        </button>
         <button id="add-btn" class="btn primary">
           <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           新增
@@ -91,30 +95,27 @@
 
     <div class="vault-layout">
       <aside class="category-panel">
-        <div class="category-panel-head">
-          <span>密码本</span>
-          <span class="category-panel-note">分类</span>
-        </div>
+        <div class="category-panel-head"><span>分类</span></div>
         <nav class="chips" id="chips"></nav>
       </aside>
 
       <section class="vault-content">
         <div class="content-toolbar">
           <div>
-            <p class="content-eyebrow">已解锁的密码库</p>
-            <h1>我的凭据</h1>
+            <p class="content-eyebrow" id="entry-count">0 条记录</p>
+            <h1>密码本</h1>
           </div>
           <select id="sort-select" class="sort-select" title="排序方式">
-            <option value="updated">最近更新</option>
-            <option value="name">名称</option>
-            <option value="created">创建时间</option>
+            <option value="updated">更新：最新优先</option>
+            <option value="name">名称：拼音 A-Z</option>
+            <option value="created">创建：最新优先</option>
           </select>
         </div>
 
         <main class="grid" id="grid"></main>
 
         <div class="empty hidden" id="empty">
-          <div class="empty-icon">🔐</div>
+          <div class="empty-icon"><svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
           <h2 id="empty-title">还没有任何条目</h2>
           <p id="empty-text">点击右上角「新增」，开始记录你的第一个账号密码</p>
         </div>
@@ -156,9 +157,9 @@
             <input type="text" id="m-subtitle" placeholder="如：工作用 / 家庭用 / 主卡" maxlength="120">
           </label>
           <div class="field span2">
-            <span>图标（可选，上传图片显示在卡片名称前；不设置则显示文字）</span>
+            <span>图标（可选）</span>
             <div class="icon-picker">
-              <div class="icon-preview" id="icon-preview">🔤</div>
+              <div class="icon-preview" id="icon-preview">A</div>
               <button type="button" class="btn ghost sm" id="icon-upload-btn">上传图片</button>
               <button type="button" class="btn ghost sm" id="icon-remove-btn">移除</button>
             </div>
@@ -173,7 +174,7 @@
           </label>
           <div class="span2 fields-section">
             <div class="fields-head">
-              <span class="fields-title">📝 字段 · 📌 置顶到卡片 · ⧉ 卡片复制按钮</span>
+              <span class="fields-title">账号信息</span>
               <div class="fields-head-btns">
                 <button type="button" class="btn ghost sm" id="fields-divider-btn">— 分割线</button>
                 <button type="button" class="btn ghost sm" id="fields-add-btn">＋ 添加字段</button>
@@ -184,7 +185,7 @@
         </div>
         <div class="span2 attach-section" id="attach-section">
           <div class="attach-head">
-            <span class="attach-title">📎 附件</span>
+            <span class="attach-title">附件</span>
             <button type="button" class="btn ghost sm" id="attach-add-btn">＋ 添加附件</button>
           </div>
           <div id="attach-list"></div>
@@ -195,6 +196,38 @@
           <button type="submit" class="btn primary">保存</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- ======== 只读条目详情 ======== -->
+  <div class="modal hidden" id="view-modal" role="dialog" aria-modal="true" aria-labelledby="view-title">
+    <div class="modal-card view-card">
+      <div class="view-head">
+        <div class="view-identity">
+          <div class="avatar" id="view-icon"></div>
+          <div>
+            <h2 id="view-title"></h2>
+            <p id="view-subtitle" class="hidden"></p>
+          </div>
+        </div>
+        <button type="button" class="icon-btn" id="view-close" title="关闭" aria-label="关闭详情">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="view-meta">
+        <span class="badge" id="view-category"></span>
+        <span id="view-created"></span>
+        <span id="view-updated"></span>
+      </div>
+      <div class="view-fields" id="view-fields"></div>
+      <section class="view-attachments hidden" id="view-attachments-section">
+        <h3>附件</h3>
+        <div id="view-attachments"></div>
+      </section>
+      <div class="view-foot">
+        <button type="button" class="btn ghost" id="view-done">关闭</button>
+        <button type="button" class="btn primary" id="view-edit">编辑条目</button>
+      </div>
     </div>
   </div>
 
@@ -210,12 +243,27 @@
       <div class="settings-body">
         <!-- 设置菜单 -->
         <div id="settings-menu">
-          <button class="settings-row" data-open="cats">🏷️ 分类管理</button>
-          <button class="settings-row" data-open="autolock">⏰ 自动锁定</button>
-          <button class="settings-row" data-open="backup">💾 备份与恢复</button>
-          <button class="settings-row" data-open="password">🔑 修改主密码</button>
-          <button class="settings-row" data-open="totp">🔐 两步验证（TOTP）</button>
-          <button class="settings-row" data-open="about">ℹ️ 关于</button>
+          <button class="settings-row" data-open="cats">分类管理</button>
+          <button class="settings-row" data-open="autolock">自动锁定</button>
+          <button class="settings-row" data-open="connection">连接安全</button>
+          <button class="settings-row" data-open="backup">备份与恢复</button>
+          <button class="settings-row" data-open="health">密码健康</button>
+          <button class="settings-row" data-open="password">修改主密码</button>
+          <button class="settings-row" data-open="totp">两步验证（TOTP）</button>
+          <button class="settings-row" data-open="about">关于</button>
+        </div>
+
+        <div class="settings-section hidden" id="settings-connection">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card">
+            <h3>连接安全</h3>
+            <p class="settings-desc" id="connection-status"></p>
+            <label class="connection-toggle">
+              <input type="checkbox" id="https-required">
+              <span>仅允许 HTTPS 访问</span>
+            </label>
+            <p class="settings-desc" id="connection-guidance">请先在反向代理中配置 HTTPS，再通过 HTTPS 地址打开 Keystone，才能开启此项。此开关不会自动申请证书。</p>
+          </div>
         </div>
 
         <!-- 分类管理 -->
@@ -267,9 +315,9 @@
               <div class="stat"><b>0</b><span>分类</span></div>
               <div class="stat"><b>0</b><span>附件</span></div>
             </div>
-            <p class="settings-desc about-desc">极简、私密的个人密码管理器。自托管、零知识加密，所有数据都掌握在你自己手里。</p>
+            <p class="settings-desc about-desc">自托管的个人密码管理器。条目由服务端加密存储，数据由你自己管理。</p>
             <div class="about-info">
-              <p>🔒 所有数据加密存储（AES-256-GCM），服务端只保存密文，即使数据文件泄露也无法读取</p>
+              <p>🔒 条目内容和附件使用 AES-256-GCM 加密；分类、时间和附件名称等元数据不加密</p>
               <p>🔑 主密码通过 scrypt 派生密钥，仅存在于内存，重启服务后自动回到锁定状态</p>
               <p>⏱ 闲置自动锁定，随时可手动锁定，防止他人使用</p>
               <p>📦 支持自定义字段、附件、分类管理、加密备份导出/导入、两步验证解锁</p>
@@ -284,6 +332,7 @@
           <div class="settings-card">
             <h3>💾 备份与恢复</h3>
             <p class="settings-desc">备份包含全部条目、附件和两步验证配置（不含主密码）。恢复后请用<b>备份对应的主密码</b>解锁。</p>
+            <p class="backup-status" id="backup-status"></p>
             <div class="backup-actions">
               <button class="btn primary" id="backup-export-btn">导出加密备份</button>
               <button class="btn ghost" id="backup-import-btn">导入备份</button>
@@ -294,6 +343,16 @@
               <p>💡 顶栏的「导出/导入」图标与这里的按钮功能相同</p>
               <p>🔄 服务端每天自动备份数据到 data/backups/ 目录，保留最近 7 份</p>
             </div>
+          </div>
+        </div>
+
+        <div class="settings-section hidden" id="settings-health">
+          <button class="settings-back">‹ 返回设置</button>
+          <div class="settings-card">
+            <h3>密码健康</h3>
+            <p class="settings-desc">仅检查当前已解锁的条目，不会上传密码或在这里显示明文。</p>
+            <p class="health-summary" id="health-summary"></p>
+            <div id="health-list" class="health-list"></div>
           </div>
         </div>
 

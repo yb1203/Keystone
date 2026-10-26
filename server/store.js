@@ -23,7 +23,7 @@
  *
  * 写入采用「临时文件 + 原子重命名」，且每次覆盖前自动保留一份 .bak，
  * 即使中途断电也不会损坏主文件；主文件损坏时自动回退到 .bak。
- * 备份 = 直接复制这一个文件。
+ * .bak 只保存主数据文件；完整自动备份另见 index.js（包含附件）。
  */
 const fs = require('node:fs/promises');
 const path = require('node:path');

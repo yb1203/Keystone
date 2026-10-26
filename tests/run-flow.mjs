@@ -1,5 +1,5 @@
 // 自包含 API 流程测试：临时启动独立服务与数据目录，不触碰本地密码库。
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -44,6 +44,25 @@ try {
   });
   const code = await new Promise((resolve) => test.once('exit', resolve));
   process.exitCode = code || 0;
+  if (code === 0) {
+    server.kill('SIGTERM');
+    await waitForExit(server);
+    server = spawn(process.execPath, ['server/index.js'], {
+      cwd: ROOT,
+      env: { ...process.env, DATA_DIR, PORT, HOST: '127.0.0.1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    server.stdout.on('data', (chunk) => { output += chunk; });
+    server.stderr.on('data', (chunk) => { output += chunk; });
+    await waitForHealth();
+    const stamp = new Date().toISOString().slice(0, 10);
+    const backup = JSON.parse(await readFile(join(DATA_DIR, 'backups', `vault-${stamp}.json`), 'utf8'));
+    const refs = new Set(backup.entries.flatMap((entry) => (entry.attachments || []).map((att) => att.id)));
+    if (!refs.size || [...refs].some((id) => !backup.attachments?.[id])) {
+      throw new Error('自动备份未完整包含附件');
+    }
+    console.log('自动备份含全部附件: ✓');
+  }
 } catch (err) {
   console.error(err.message);
   process.exitCode = 1;

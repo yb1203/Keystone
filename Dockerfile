@@ -6,7 +6,7 @@ WORKDIR /app
 
 # 先装依赖（利用 Docker 层缓存）
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # 拷贝应用代码
 COPY server ./server

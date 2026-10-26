@@ -2,10 +2,10 @@
 /**
  * Keystone - 后端服务
  *
- * 极简零知识架构：
+ * 服务端加密架构：
  *  - 首次访问创建主密码，服务端只保存 scrypt 盐和加密验证令牌
  *  - 解锁时用主密码派生密钥，密钥仅保存在服务器内存（按会话），重启即丢失 → 回到锁定态
- *  - 所有条目字段 AES-256-GCM 加密后才落盘，数据库/数据文件泄露也只是密文
+ *  - 条目内容和附件以 AES-256-GCM 加密落盘；分类和时间等元数据仍为明文
  *  - 解锁接口限流，防止暴力破解
  */
 const path = require('node:path');
@@ -31,13 +31,15 @@ const MAX_ATTEMPTS = Number(process.env.VAULT_UNLOCK_MAX_ATTEMPTS) || 5;
 const LOCKOUT_MS = (Number(process.env.VAULT_UNLOCK_LOCKOUT_SECONDS) || 60) * 1000;
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const ATTACH_DIR = path.join(DATA_DIR, 'attachments'); // 附件加密文件目录
-const BACKUP_DIR = path.join(DATA_DIR, 'backups'); // 自动备份目录
+const BACKUP_DIR = process.env.VAULT_BACKUP_DIR || path.join(DATA_DIR, 'backups'); // 可设为独立挂载目录
+const REKEY_JOURNAL_FILE = path.join(DATA_DIR, '.rekey-journal.json');
+const IMPORT_JOURNAL_FILE = path.join(DATA_DIR, '.import-journal.json');
 const RESET_MARKER_FILE = path.join(DATA_DIR, '.reset-token');
 const BACKUP_KEEP = Number(process.env.VAULT_BACKUP_KEEP) || 7; // 自动备份保留份数
 const MAX_ATTACH_BYTES = (Number(process.env.VAULT_ATTACH_MAX_MB) || 20) * 1024 * 1024; // 单文件上限（默认 20MB）
 const RESET_TOKEN = String(process.env.VAULT_RESET_TOKEN || '').trim();
 
-// HTTPS 部署模式：开启后 Cookie 加 Secure 标志并启用 HSTS（必须走 TLS 反向代理）
+// 兼容旧部署变量；设置页的 HTTPS 要求另存于密码库设置中。
 const SECURE_MODE = process.env.VAULT_HTTPS === 'true';
 
 // 附件上传：内存暂存（上限 20MB），文件名由服务端 UUID 生成，杜绝路径穿越
@@ -51,7 +53,8 @@ const app = express();
 app.disable('x-powered-by');
 // 部署在反向代理后面时开启，解锁限流才能看到真实客户端 IP
 if (process.env.VAULT_TRUST_PROXY === 'true') app.set('trust proxy', 1);
-app.use(express.json({ limit: '200mb' })); // 备份可能内嵌附件(base64)，放宽体积限制
+app.use('/api/import', express.json({ limit: '200mb' })); // 只有完整备份导入需要大请求体
+app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -60,12 +63,27 @@ app.use((req, res, next) => {
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data: blob:; connect-src 'self' blob:; frame-src 'self' blob:; " +
     "object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
-  if (SECURE_MODE) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  if (req.secure && (SECURE_MODE || store.data.settings?.httpsRequired)) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+  }
   if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store'); // 敏感响应禁止缓存
   next();
 });
 
 const store = new VaultStore(DATA_FILE);
+app.use((req, res, next) => {
+  if (!store.data.settings?.httpsRequired || req.secure || req.path === '/api/health') return next();
+  if (req.path.startsWith('/api/')) return res.status(403).json({ error: '此密码库已要求 HTTPS，请使用 HTTPS 地址访问' });
+  res.status(403).type('text/plain').send('此密码库已要求 HTTPS，请使用 HTTPS 地址访问');
+});
+
+function connectionSettings(req) {
+  return { httpsRequired: !!store.data.settings?.httpsRequired, secureConnection: req.secure };
+}
+
+function sessionCookieOptions(req) {
+  return { httpOnly: true, sameSite: 'strict', path: '/', secure: req.secure || SECURE_MODE || !!store.data.settings?.httpsRequired };
+}
 
 /**
  * 由 Compose 显式请求时清空数据卷。令牌只保存哈希；相同令牌只会执行一次，
@@ -80,8 +98,18 @@ async function resetVaultIfRequested() {
 
   await fs.rm(DATA_FILE, { force: true });
   await fs.rm(DATA_FILE + '.bak', { force: true });
+  await fs.rm(REKEY_JOURNAL_FILE, { force: true });
+  await fs.rm(IMPORT_JOURNAL_FILE, { force: true });
+  await fs.rm(IMPORT_JOURNAL_FILE + '.tmp', { force: true });
   await fs.rm(ATTACH_DIR, { recursive: true, force: true });
-  await fs.rm(BACKUP_DIR, { recursive: true, force: true });
+  for (const name of await fs.readdir(DATA_DIR).catch(() => [])) {
+    if (/^attachments\.import-[0-9a-f-]{36}\.(next|old)$/.test(name)) {
+      await fs.rm(path.join(DATA_DIR, name), { recursive: true, force: true });
+    }
+  }
+  if (BACKUP_DIR === path.join(DATA_DIR, 'backups')) {
+    await fs.rm(BACKUP_DIR, { recursive: true, force: true });
+  }
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.writeFile(RESET_MARKER_FILE, tokenHash, { mode: 0o600 });
   console.warn('[vault] 已按 VAULT_RESET_TOKEN 请求清空密码库');
@@ -98,6 +126,25 @@ const TOTP_PENDING_TTL_MS = 10 * 60 * 1000;
 const pendingAtts = new Map();
 const PENDING_ATT_TTL_MS = 30 * 60 * 1000;
 let vaultMaintenance = false;
+let vaultRecoveryNeeded = false;
+let setupInProgress = false;
+let activeDerivations = 0;
+const MAX_ACTIVE_DERIVATIONS = 2;
+const backupStatus = { lastSuccess: null, lastError: null };
+const COMMON_MASTER_PASSWORDS = new Set([
+  'password', 'password123', 'password12345', 'password123456', '123456', '123456789',
+  '123456789012', 'qwerty123', 'qwerty123456', 'admin123', 'admin12345678',
+  'letmein123456', 'iloveyou12345',
+]);
+
+function masterPasswordError(password, label = '主密码') {
+  if ([...password].length < 8) return `${label}至少需要 8 位，建议使用 15 位以上的独特短语`;
+  if (password.length > 200) return `${label}过长`;
+  if (COMMON_MASTER_PASSWORDS.has(password.toLowerCase()) || /^(.)\1{7,}$/u.test(password)) {
+    return `${label}过于常见，请换一个独特的密码短语`;
+  }
+  return null;
+}
 
 // ---------------- 会话工具 ----------------
 function parseCookies(req) {
@@ -154,6 +201,7 @@ const withVaultMaintenance = (fn) => h(async (req, res, next) => {
 });
 
 app.use('/api', (req, res, next) => {
+  if (vaultRecoveryNeeded) return res.status(503).json({ error: '密码库需要重启以恢复中断的主密码修改' });
   if (vaultMaintenance && !['/health', '/state', '/lock'].includes(req.path)) {
     return res.status(409).json({ error: '密码库正在执行重要操作，请稍后再试' });
   }
@@ -367,6 +415,16 @@ async function cleanupOrphanAttachments() {
   if (removed > 0) console.warn(`[vault] 已清理 ${removed} 个孤儿附件文件`);
 }
 
+async function cleanupStaleRekeyFiles() {
+  let files;
+  try { files = await fs.readdir(ATTACH_DIR); } catch { return; }
+  for (const name of files) {
+    if (/^[0-9a-f-]{36}\.bin\.rekey-[0-9a-f-]{36}\.(next|old)$/.test(name)) {
+      await fs.rm(path.join(ATTACH_DIR, name), { force: true });
+    }
+  }
+}
+
 // ---------------- API ----------------
 app.get('/api/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
@@ -376,12 +434,15 @@ app.get('/api/state', (req, res) => {
     unlocked: !!getSession(req, false),
     autoLockMinutes: currentAutoLockMs() / 60_000,
     totpEnabled: !!totpEnabled(),
+    ...connectionSettings(req),
   });
 });
 
+app.post('/api/activity', auth, (req, res) => res.json({ ok: true }));
+
 /** 读取设置 */
 app.get('/api/settings', auth, (req, res) => {
-  res.json({ autoLockMinutes: currentAutoLockMs() / 60_000 });
+  res.json({ autoLockMinutes: currentAutoLockMs() / 60_000, ...connectionSettings(req) });
 });
 
 /** 保存设置（自动锁定时长，分钟） */
@@ -392,23 +453,44 @@ app.post('/api/settings', auth, h(async (req, res) => {
   }
   store.data.settings = { ...(store.data.settings || {}), autoLockMinutes: Math.round(m) };
   await store.save();
-  res.json({ ok: true, autoLockMinutes: currentAutoLockMs() / 60_000 });
+  res.json({ ok: true, autoLockMinutes: currentAutoLockMs() / 60_000, ...connectionSettings(req) });
+}));
+
+app.post('/api/settings/https', auth, h(async (req, res) => {
+  const required = req.body?.httpsRequired;
+  if (typeof required !== 'boolean') return res.status(400).json({ error: 'HTTPS 设置无效' });
+  if (!req.secure) return res.status(400).json({ error: '请先配置 HTTPS 反向代理，并从 HTTPS 地址打开 Keystone' });
+  store.data.settings = { ...(store.data.settings || {}), httpsRequired: required };
+  await store.save();
+  res.setHeader('Strict-Transport-Security', required || SECURE_MODE ? 'max-age=31536000' : 'max-age=0');
+  res.json({ ok: true, ...connectionSettings(req) });
 }));
 
 /** 首次初始化：创建主密码 */
 app.post('/api/setup', h(async (req, res) => {
-  if (store.data.kdf) return res.status(409).json({ error: 'Keystone 已初始化，不能重复创建' });
+  if (store.data.kdf || setupInProgress) return res.status(409).json({ error: 'Keystone 已初始化或正在初始化' });
   const pw = String(req.body?.password ?? '');
-  if (pw.length < 8) return res.status(400).json({ error: '主密码至少需要 8 位' });
-  if (pw.length > 200) return res.status(400).json({ error: '主密码过长' });
+  const policyError = masterPasswordError(pw);
+  if (policyError) return res.status(400).json({ error: policyError });
 
-  const { salt, verifier, key } = await createVault(pw);
-  store.data.kdf = { salt, verifier, createdAt: Date.now() };
-  await store.save();
+  if (activeDerivations >= MAX_ACTIVE_DERIVATIONS) return res.status(503).json({ error: '解锁请求较多，请稍后再试' });
+  setupInProgress = true;
+  activeDerivations++;
+  let created;
+  try {
+    created = await createVault(pw);
+    const nextData = structuredClone(store.data);
+    nextData.kdf = { salt: created.salt, verifier: created.verifier, createdAt: Date.now() };
+    await store.replace(nextData);
+  } finally {
+    activeDerivations--;
+    setupInProgress = false;
+  }
+  const { key } = created;
 
   const sid = crypto.randomBytes(24).toString('base64url');
   sessions.set(sid, { key, lastActive: Date.now() });
-  res.cookie('vsid', sid, { httpOnly: true, sameSite: 'strict', path: '/', secure: SECURE_MODE });
+  res.cookie('vsid', sid, sessionCookieOptions(req));
   res.json({ ok: true });
 }));
 
@@ -435,11 +517,16 @@ app.post('/api/unlock', h(async (req, res) => {
   };
 
   const pw = String(req.body?.password ?? '');
+  if (pw.length > 200) return res.status(400).json({ error: '主密码过长' });
+  if (activeDerivations >= MAX_ACTIVE_DERIVATIONS) return res.status(503).json({ error: '解锁请求较多，请稍后再试' });
   let key;
+  activeDerivations++;
   try {
     key = await unlockVault(pw, store.data.kdf);
   } catch {
     return fail('主密码错误');
+  } finally {
+    activeDerivations--;
   }
 
   // 两步验证校验（仅当已开启）
@@ -458,7 +545,7 @@ app.post('/api/unlock', h(async (req, res) => {
   if (att) attempts.delete(ip);
   const sid = crypto.randomBytes(24).toString('base64url');
   sessions.set(sid, { key, lastActive: Date.now() });
-  res.cookie('vsid', sid, { httpOnly: true, sameSite: 'strict', path: '/', secure: SECURE_MODE });
+  res.cookie('vsid', sid, sessionCookieOptions(req));
   res.json({ ok: true });
 }));
 
@@ -611,12 +698,51 @@ async function clearPendingAttachments() {
   await removeFiles(files);
 }
 
+async function recoverRekey() {
+  let journal;
+  try { journal = JSON.parse(await fs.readFile(REKEY_JOURNAL_FILE, 'utf8')); }
+  catch (err) {
+    if (err.code === 'ENOENT') return;
+    throw new Error(`主密码修改日志无法读取，已停止启动：${err.message}`);
+  }
+  if (!journal || !/^\.rekey-[0-9a-f-]+$/.test(journal.tx) ||
+      !Array.isArray(journal.ids) || !journal.ids.every((id) => /^[0-9a-f-]{36}$/.test(id)) ||
+      typeof journal.oldSalt !== 'string' || typeof journal.newSalt !== 'string' ||
+      !journal.oldDigests || !journal.newDigests ||
+      !journal.ids.every((id) => /^[0-9a-f]{64}$/.test(journal.oldDigests[id]) && /^[0-9a-f]{64}$/.test(journal.newDigests[id]))) {
+    throw new Error('主密码修改日志格式无效，已停止启动');
+  }
+  const salt = store.data.kdf?.salt;
+  if (salt !== journal.oldSalt && salt !== journal.newSalt) {
+    throw new Error('主密码修改日志与数据文件不匹配，已停止启动');
+  }
+  for (const id of journal.ids) {
+    const current = attachmentPath(id);
+    const old = attachmentPath(id, `${journal.tx}.old`);
+    const next = attachmentPath(id, `${journal.tx}.next`);
+    if (salt === journal.oldSalt) {
+      const hasOld = await fs.stat(old).then(() => true, () => false);
+      if (hasOld) await fs.rename(old, current);
+      const digest = crypto.createHash('sha256').update(await fs.readFile(current)).digest('hex');
+      if (digest !== journal.oldDigests[id]) throw new Error(`附件 ${id} 无法恢复旧版本，已停止启动`);
+      await fs.rm(next, { force: true });
+    } else {
+      const digest = crypto.createHash('sha256').update(await fs.readFile(current)).digest('hex');
+      if (digest !== journal.newDigests[id]) throw new Error(`附件 ${id} 与新主密码不匹配，已停止启动`);
+      await fs.rm(old, { force: true });
+      await fs.rm(next, { force: true });
+    }
+  }
+  await fs.rm(REKEY_JOURNAL_FILE);
+  console.warn('[vault] 已恢复中断的主密码修改');
+}
+
 /** 修改主密码：验证旧密码 → 派生新密钥 → 全量重加密（条目/附件/两步验证） */
 app.post('/api/password', auth, withVaultMaintenance(async (req, res) => {
   const oldPw = String(req.body?.oldPassword ?? '');
   const newPw = String(req.body?.newPassword ?? '');
-  if (newPw.length < 8) return res.status(400).json({ error: '新主密码至少需要 8 位' });
-  if (newPw.length > 200) return res.status(400).json({ error: '新主密码过长' });
+  const policyError = masterPasswordError(newPw, '新主密码');
+  if (policyError) return res.status(400).json({ error: policyError });
   try {
     await unlockVault(oldPw, store.data.kdf); // 验证旧密码（失败即抛错）
   } catch {
@@ -647,14 +773,23 @@ app.post('/api/password', auth, withVaultMaintenance(async (req, res) => {
   const tx = `.rekey-${crypto.randomUUID()}`;
   const staged = ids.map((id) => attachmentPath(id, `${tx}.next`));
   const previous = ids.map((id) => attachmentPath(id, `${tx}.old`));
-  const promoted = [];
+  let journalWritten = false;
+  const oldDigests = {};
+  const newDigests = {};
 
   try {
     // 先写入独立临时文件。任一附件缺失或损坏都会中止，原文件保持不动。
     for (const id of ids) {
+      oldDigests[id] = crypto.createHash('sha256').update(await fs.readFile(attachmentPath(id))).digest('hex');
       const plain = await readAttachment(oldKey, id);
       await writeAttachment(newKey, id, plain, `${tx}.next`);
+      newDigests[id] = crypto.createHash('sha256').update(await fs.readFile(attachmentPath(id, `${tx}.next`))).digest('hex');
     }
+
+    const journalTmp = REKEY_JOURNAL_FILE + '.tmp';
+    await fs.writeFile(journalTmp, JSON.stringify({ tx, ids, oldSalt: store.data.kdf.salt, newSalt: nextData.kdf.salt, oldDigests, newDigests }), { mode: 0o600 });
+    await fs.rename(journalTmp, REKEY_JOURNAL_FILE);
+    journalWritten = true;
 
     // 文件切换失败时立即回滚，避免主数据与附件使用不同密钥。
     for (const id of ids) {
@@ -664,7 +799,6 @@ app.post('/api/password', auth, withVaultMaintenance(async (req, res) => {
       await fs.rename(current, old);
       try {
         await fs.rename(next, current);
-        promoted.push(id);
       } catch (err) {
         await fs.rename(old, current).catch(() => {});
         throw err;
@@ -672,17 +806,19 @@ app.post('/api/password', auth, withVaultMaintenance(async (req, res) => {
     }
     await store.replace(nextData);
   } catch (err) {
-    for (const id of promoted.reverse()) {
-      const current = attachmentPath(id);
-      const old = attachmentPath(id, `${tx}.old`);
-      await fs.unlink(current).catch(() => {});
-      await fs.rename(old, current).catch(() => {});
+    try {
+      if (journalWritten) await recoverRekey();
+      else await removeFiles(staged);
+    } catch (recoveryError) {
+      vaultRecoveryNeeded = true;
+      console.error('[password] 回滚失败，服务已禁止继续操作，需重启恢复:', recoveryError.message);
+      return res.status(500).json({ error: '修改主密码中断，请重启服务完成恢复' });
     }
-    await removeFiles(staged.concat(previous));
     console.error('[password] 主密码修改失败:', err.message);
     return res.status(500).json({ error: '修改主密码失败，数据未变更' });
   }
   await removeFiles(previous);
+  await fs.rm(REKEY_JOURNAL_FILE, { force: true });
 
   // 新密钥只交给新的会话；旧标签页和设备不能再用旧密钥写入数据。
   sessions.clear();
@@ -690,7 +826,7 @@ app.post('/api/password', auth, withVaultMaintenance(async (req, res) => {
   await clearPendingAttachments();
   const sid = crypto.randomBytes(24).toString('base64url');
   sessions.set(sid, { key: newKey, lastActive: Date.now() });
-  res.cookie('vsid', sid, { httpOnly: true, sameSite: 'strict', path: '/', secure: SECURE_MODE });
+  res.cookie('vsid', sid, sessionCookieOptions(req));
   res.json({ ok: true, message: '主密码已修改，其他会话已锁定' });
 }));
 
@@ -787,6 +923,16 @@ app.put('/api/entries/:id', auth, h(async (req, res) => {
   if (parsedFields !== null) { // 未传 fields 时保留原字段（兼容）
     entry.fields = encryptFields(parsedFields, req.session.key);
   }
+  await store.save();
+  res.json({ entry: toClient(entry, req.session.key) });
+}));
+
+/** 收藏仅改变分类状态，不算凭据内容更新。 */
+app.patch('/api/entries/:id/favorite', auth, h(async (req, res) => {
+  const entry = store.data.entries.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: '条目不存在' });
+  if (typeof req.body?.favorite !== 'boolean') return res.status(400).json({ error: '收藏状态无效' });
+  entry.favorite = req.body.favorite;
   await store.save();
   res.json({ entry: toClient(entry, req.session.key) });
 }));
@@ -940,18 +1086,107 @@ app.delete('/api/categories/:name', auth, h(async (req, res) => {
   res.json({ categories: store.data.categories });
 }));
 
+function attachmentIds(entries) {
+  return [...new Set(entries.flatMap((entry) => (entry.attachments || []).map((att) => att.id)))];
+}
+
+async function readCompleteAttachments(entries) {
+  const attachments = {};
+  const missing = [];
+  for (const id of attachmentIds(entries)) {
+    if (!/^[0-9a-fA-F-]{36}$/.test(id)) {
+      missing.push(id);
+      continue;
+    }
+    try {
+      attachments[id] = (await fs.readFile(attachmentPath(id))).toString('base64');
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      missing.push(id);
+    }
+  }
+  return { attachments, missing };
+}
+
+function vaultDigest(data) {
+  return crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex');
+}
+
+async function pathExists(file) {
+  try { await fs.access(file); return true; } catch (err) {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+async function recoverImport() {
+  if (!await pathExists(IMPORT_JOURNAL_FILE)) return;
+  const journal = JSON.parse(await fs.readFile(IMPORT_JOURNAL_FILE, 'utf8'));
+  if (!/^[0-9a-f-]{36}$/.test(journal.tx) ||
+      !/^[0-9a-f]{64}$/.test(journal.newDigest) || !/^[0-9a-f]{64}$/.test(journal.oldDigest)) {
+    throw new Error('导入恢复记录无效，已停止启动以保护数据');
+  }
+  const stage = `${ATTACH_DIR}.import-${journal.tx}.next`;
+  const previous = `${ATTACH_DIR}.import-${journal.tx}.old`;
+  const hasPrevious = await pathExists(previous);
+  const digest = vaultDigest(store.data);
+  if (hasPrevious && digest === journal.newDigest &&
+      (journal.oldDigest !== journal.newDigest || journal.committed)) {
+    if (!await pathExists(ATTACH_DIR)) throw new Error('导入附件目录缺失，已停止启动');
+    await fs.rm(previous, { recursive: true, force: true });
+  } else if (digest === journal.oldDigest) {
+    if (hasPrevious) {
+      await fs.rm(ATTACH_DIR, { recursive: true, force: true });
+      await fs.rename(previous, ATTACH_DIR);
+    }
+  } else if (!hasPrevious && digest === journal.newDigest && await pathExists(ATTACH_DIR)) {
+    // 主数据已经提交，旧附件目录也已清理；只需删除残留的恢复记录。
+  } else {
+    throw new Error('导入数据状态不明确，已停止启动以保护数据');
+  }
+  await fs.rm(stage, { recursive: true, force: true });
+  await fs.rm(IMPORT_JOURNAL_FILE, { force: true });
+  await fs.rm(IMPORT_JOURNAL_FILE + '.tmp', { force: true });
+}
+
+async function cleanupStaleImportFiles() {
+  await fs.rm(IMPORT_JOURNAL_FILE + '.tmp', { force: true });
+  let names;
+  try { names = await fs.readdir(DATA_DIR); } catch (err) {
+    if (err.code === 'ENOENT') return;
+    throw err;
+  }
+  for (const name of names) {
+    if (/^attachments\.import-[0-9a-f-]{36}\.(next|old)$/.test(name)) {
+      await fs.rm(path.join(DATA_DIR, name), { recursive: true, force: true });
+    }
+  }
+}
+
+app.get('/api/backup/status', auth, h(async (req, res) => {
+  let lastSuccessfulAt = backupStatus.lastSuccess;
+  try {
+    const names = (await fs.readdir(BACKUP_DIR)).filter((name) => /^vault-\d{4}-\d{2}-\d{2}\.json$/.test(name)).sort();
+    if (names.length) {
+      const stat = await fs.stat(path.join(BACKUP_DIR, names.at(-1)));
+      lastSuccessfulAt = Math.max(lastSuccessfulAt || 0, stat.mtimeMs);
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  let missingAttachments = 0;
+  for (const id of attachmentIds(store.data.entries)) {
+    if (!/^[0-9a-fA-F-]{36}$/.test(id) || !await pathExists(attachmentPath(id))) missingAttachments++;
+  }
+  res.json({ lastSuccessfulAt, lastError: backupStatus.lastError, missingAttachments });
+}));
+
 /** 导出加密备份（原始密文，不含主密码；附件加密文件以 base64 内嵌，单文件完整备份） */
 app.get('/api/export', auth, h(async (req, res) => {
   const out = structuredClone(store.data);
-  out.attachments = {};
-  const ids = new Set();
-  for (const e of out.entries) for (const a of e.attachments || []) ids.add(a.id);
-  for (const id of ids) {
-    try {
-      const buf = await fs.readFile(path.join(ATTACH_DIR, id + '.bin'));
-      out.attachments[id] = buf.toString('base64');
-    } catch { /* 文件缺失则跳过 */ }
-  }
+  const result = await readCompleteAttachments(out.entries);
+  if (result.missing.length) return res.status(409).json({ error: `导出失败：${result.missing.length} 个附件文件缺失，未生成不完整备份` });
+  out.attachments = result.attachments;
   const name = `vault-backup-${new Date().toISOString().slice(0, 10)}.json`;
   res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
   res.json(out);
@@ -964,15 +1199,9 @@ app.post('/api/export-selected', auth, h(async (req, res) => {
   const out = structuredClone(store.data);
   out.entries = store.data.entries.filter((e) => ids.includes(e.id));
   if (!out.entries.length) return res.status(400).json({ error: '没有找到所选条目' });
-  out.attachments = {};
-  for (const e of out.entries) {
-    for (const a of e.attachments || []) {
-      try {
-        const buf = await fs.readFile(path.join(ATTACH_DIR, a.id + '.bin'));
-        out.attachments[a.id] = buf.toString('base64');
-      } catch { /* 文件缺失则跳过 */ }
-    }
-  }
+  const result = await readCompleteAttachments(out.entries);
+  if (result.missing.length) return res.status(409).json({ error: `导出失败：${result.missing.length} 个附件文件缺失，未生成不完整备份` });
+  out.attachments = result.attachments;
   const name = `keystone-selected-${new Date().toISOString().slice(0, 10)}.json`;
   res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
   res.json(out);
@@ -1000,33 +1229,78 @@ app.post('/api/import', withVaultMaintenance(async (req, res) => {
     }
   }
 
-  // 附件是备份传输字段，不属于 vault.json；只恢复到附件目录。
+  // 附件是备份传输字段，不属于 vault.json；缺失或损坏时拒绝整份备份。
   const { attachments: embeddedAttachments, ...nextData } = d;
-  if (embeddedAttachments && typeof embeddedAttachments === 'object') {
-    await fs.mkdir(ATTACH_DIR, { recursive: true });
-    for (const [id, b64] of Object.entries(embeddedAttachments)) {
-      if (!/^[0-9a-fA-F-]{36}$/.test(id) || typeof b64 !== 'string') continue;
-      try {
-        await fs.writeFile(path.join(ATTACH_DIR, id + '.bin'), Buffer.from(b64, 'base64'));
-      } catch { /* 忽略损坏的附件数据 */ }
-    }
+  if (embeddedAttachments !== undefined && (!embeddedAttachments || typeof embeddedAttachments !== 'object' || Array.isArray(embeddedAttachments))) {
+    return res.status(400).json({ error: '备份附件格式无效' });
   }
-  await store.replace(nextData);
-  await cleanupOrphanAttachments();
-
-  // 统计备份引用的附件在本机是否缺失（附件文件不包含在备份 JSON 里）
-  const refIds = new Set();
-  for (const e of nextData.entries) for (const a of e.attachments || []) refIds.add(a.id);
-  let missing = 0;
-  for (const id of refIds) {
-    try { await fs.access(path.join(ATTACH_DIR, id + '.bin')); } catch { missing++; }
+  const refs = attachmentIds(nextData.entries);
+  const files = new Map();
+  for (const id of refs) {
+    const b64 = embeddedAttachments?.[id];
+    if (!/^[0-9a-fA-F-]{36}$/.test(id) || typeof b64 !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
+      return res.status(400).json({ error: '备份缺少有效的附件文件，未修改当前密码库' });
+    }
+    const bytes = Buffer.from(b64, 'base64');
+    if (bytes.length < 28 || bytes.toString('base64') !== b64) {
+      return res.status(400).json({ error: '备份附件数据损坏，未修改当前密码库' });
+    }
+    files.set(id, bytes);
+  }
+  nextData.version = 1;
+  if (!Array.isArray(nextData.categories)) {
+    nextData.categories = [...new Set(nextData.entries.map((entry) => entry.category).filter(Boolean))];
+  }
+  const tx = crypto.randomUUID();
+  const stage = `${ATTACH_DIR}.import-${tx}.next`;
+  const previous = `${ATTACH_DIR}.import-${tx}.old`;
+  let journalWritten = false;
+  let dataCommitted = false;
+  try {
+    await fs.mkdir(stage, { recursive: true, mode: 0o700 });
+    for (const [id, bytes] of files) await fs.writeFile(path.join(stage, `${id}.bin`), bytes, { mode: 0o600 });
+    await fs.mkdir(ATTACH_DIR, { recursive: true, mode: 0o700 });
+    const journal = { tx, oldDigest: vaultDigest(store.data), newDigest: vaultDigest(nextData) };
+    await fs.writeFile(IMPORT_JOURNAL_FILE + '.tmp', JSON.stringify(journal), { mode: 0o600 });
+    await fs.rename(IMPORT_JOURNAL_FILE + '.tmp', IMPORT_JOURNAL_FILE);
+    journalWritten = true;
+    await fs.rename(ATTACH_DIR, previous);
+    await fs.rename(stage, ATTACH_DIR);
+    await store.replace(nextData);
+    dataCommitted = true;
+    journal.committed = true;
+    await fs.writeFile(IMPORT_JOURNAL_FILE + '.tmp', JSON.stringify(journal), { mode: 0o600 });
+    await fs.rename(IMPORT_JOURNAL_FILE + '.tmp', IMPORT_JOURNAL_FILE);
+  } catch (err) {
+    if (dataCommitted) {
+      vaultRecoveryNeeded = true;
+      console.error('[import] 主数据已提交但恢复记录更新失败，需重启确认:', err.message);
+      return res.status(500).json({ error: '导入提交中断，请重启服务完成恢复' });
+    }
+    try {
+      if (journalWritten) await recoverImport();
+      else await fs.rm(stage, { recursive: true, force: true });
+    } catch (recoveryError) {
+      vaultRecoveryNeeded = true;
+      console.error('[import] 回滚失败，需重启恢复:', recoveryError.message);
+      return res.status(500).json({ error: '导入中断，请重启服务完成恢复' });
+    }
+    console.error('[import] 导入失败:', err.message);
+    return res.status(500).json({ error: '导入失败，当前密码库未变更' });
+  }
+  try {
+    await fs.rm(previous, { recursive: true, force: true });
+    await fs.rm(IMPORT_JOURNAL_FILE, { force: true });
+  } catch (err) {
+    console.warn('[import] 提交后清理失败，将在重启时继续:', err.message);
   }
 
   sessions.clear(); // 主密码/密钥可能已变化，强制重新解锁
   totpPending.clear();
   await clearPendingAttachments();
+  await makeBackup(true);
   res.clearCookie('vsid', { path: '/' });
-  res.json({ ok: true, message: '导入成功，请重新解锁', missingAttachments: missing });
+  res.json({ ok: true, message: '导入成功，请重新解锁', missingAttachments: 0 });
 }));
 
 // ---------------- 前端静态资源 ----------------
@@ -1053,20 +1327,34 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 });
 
 // ---------------- 自动备份 ----------------
-/** 复制一份当前数据文件到 backups 目录，保留最近 BACKUP_KEEP 份 */
-async function makeBackup() {
+/** 自动备份使用与手动导出相同的完整密文格式，附件缺失时不覆盖旧备份。 */
+async function makeBackup(force = false) {
+  let tmp;
   try {
+    if (vaultMaintenance && !force) return;
     await fs.mkdir(BACKUP_DIR, { recursive: true });
     const stamp = new Date().toISOString().slice(0, 10);
-    await fs.copyFile(DATA_FILE, path.join(BACKUP_DIR, `vault-${stamp}.json`));
+    const out = structuredClone(store.data);
+    out.attachments = {};
+    const ids = new Set(out.entries.flatMap((entry) => (entry.attachments || []).map((att) => att.id)));
+    for (const id of ids) {
+      out.attachments[id] = (await fs.readFile(attachmentPath(id))).toString('base64');
+    }
+    tmp = path.join(BACKUP_DIR, `.vault-${stamp}-${crypto.randomUUID()}.tmp`);
+    await fs.writeFile(tmp, JSON.stringify(out), { mode: 0o600 });
+    await fs.rename(tmp, path.join(BACKUP_DIR, `vault-${stamp}.json`));
     const files = (await fs.readdir(BACKUP_DIR))
       .filter((f) => f.startsWith('vault-') && f.endsWith('.json'))
       .sort();
     for (const f of files.slice(0, Math.max(0, files.length - BACKUP_KEEP))) {
       await fs.unlink(path.join(BACKUP_DIR, f)).catch(() => {});
     }
+    backupStatus.lastSuccess = Date.now();
+    backupStatus.lastError = null;
   } catch (err) {
     console.warn('[backup] 自动备份失败:', err.message);
+    backupStatus.lastError = '最近一次自动备份失败，请检查存储空间和附件文件';
+    if (tmp) await fs.rm(tmp, { force: true }).catch(() => {});
   }
 }
 
@@ -1074,6 +1362,10 @@ async function makeBackup() {
 (async () => {
   await resetVaultIfRequested();
   await store.load();
+  await recoverImport();
+  await cleanupStaleImportFiles();
+  await recoverRekey();
+  await cleanupStaleRekeyFiles();
   await cleanupOrphanAttachments(); // 清理失效的附件加密文件
   if (store.data.kdf) await makeBackup(); // 已有数据则启动时备份一次
   setInterval(() => { if (store.data.kdf) makeBackup(); }, 24 * 60 * 60 * 1000).unref(); // 每天备份
