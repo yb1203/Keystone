@@ -1494,6 +1494,8 @@ input:focus, select:focus, textarea:focus { box-shadow: 0 0 0 3px var(--accent-s
   margin: 17px 0 12px;
   border-top: 1px solid var(--border);
 }
+.card-fields:has(.field-divider) { border-top: 0; }
+.card-fields:has(.field-divider) .card-field:has(+ .field-divider) { border-bottom: 0; }
 .card-field {
   flex: none;
   min-width: 0;

@@ -233,6 +233,28 @@ check('卡片保留最上方分组线并忽略空尾组', await evaluate(`(() =>
   const card = new DOMParser().parseFromString(html, 'text/html');
   return [...card.querySelectorAll('.field-divider')].map((el) => el.textContent).join('|') === 'QQ1|QQ2';
 })()`));
+check('有分割线时才隐藏重复横线', await evaluate(`(() => {
+  const holder = document.createElement('div');
+  holder.innerHTML = cardHTML({
+    id: 'divider-lines-check', title: '分割线样式', category: '社交',
+    fields: [
+      { name: '第一组', type: 'divider' },
+      { name: '账号', type: 'text', value: 'first', pinned: true },
+      { name: '密码', type: 'password', value: 'secret', pinned: true },
+      { name: '第二组', type: 'divider' },
+      { name: '账号', type: 'text', value: 'second', pinned: true },
+    ],
+  });
+  document.body.append(holder);
+  const fields = holder.querySelector('.card-fields');
+  const beforeDivider = fields.querySelector('.card-field:has(+ .field-divider)');
+  const noDivider = document.querySelector('#grid .card-fields');
+  const result = getComputedStyle(fields).borderTopWidth === '0px' &&
+    getComputedStyle(beforeDivider).borderBottomWidth === '0px' &&
+    getComputedStyle(noDivider).borderTopWidth === '1px';
+  holder.remove();
+  return result;
+})()`));
 check('分类与总数正确', await evaluate(`document.querySelector('.chip[data-cat="全部"] .chip-count')?.textContent === '3' && document.querySelector('#entry-count')?.textContent === '3 条记录'`));
 check('宽桌面三列卡片', await evaluate(`(() => {
   const cards = [...document.querySelectorAll('.card')].map((card) => card.getBoundingClientRect());
