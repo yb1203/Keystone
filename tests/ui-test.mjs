@@ -121,6 +121,47 @@ await send('Page.reload');
 await sleep(2000);
 check('刷新后分类标签显示', await evaluate(`document.querySelectorAll('.chip').length === 5`)); // 全部/收藏/社交/银行/邮箱
 
+check('SVG 代码可安全转成 PNG 图标', await evaluate(`(async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#6366f1" d="M2 2h20v20H2z"/></svg>';
+  return (await rasterizeIconSvg(svg)).startsWith('data:image/png;base64,');
+})()`));
+check('SVG 脚本和外链被拒绝', await evaluate(`(() => {
+  const bad = [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><script>alert(1)</script></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><image href="https://example.com/a.png"/></svg>',
+  ];
+  return bad.every((svg) => { try { sanitizeIconSvg(svg); return false; } catch { return true; } });
+})()`));
+await evaluate(`document.querySelector('#add-btn').click()`);
+await evaluate(`(() => {
+  document.querySelector('#icon-svg-btn').click();
+  const code = document.querySelector('#icon-svg-code');
+  code.value = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#6366f1" d="M2 2h20v20H2z"/></svg>';
+  code.dispatchEvent(new Event('input', { bubbles: true }));
+})()`);
+check('粘贴 SVG 不会提前应用', await evaluate(`!state.svgIconValid && !state.pendingIcon && !document.querySelector('#icon-preview img')`));
+await evaluate(`document.querySelector('#icon-svg-apply').click()`);
+await sleep(150);
+check('点击应用后才出现 SVG 图标预览', await evaluate(`state.svgIconValid && state.pendingIcon.startsWith('data:image/png;base64,') && !!document.querySelector('#icon-preview img')`));
+await screenshot('2b-SVG图标输入');
+check('无字段名的已填内容不会在新增字段时丢失', await evaluate(`(() => {
+  document.querySelector('#fields-add-btn').click();
+  const rows = document.querySelectorAll('#fields-list .field-block');
+  rows[2].querySelector('.f-value').value = '不可丢失的内容';
+  document.querySelector('#fields-add-btn').click();
+  const kept = document.querySelectorAll('#fields-list .field-block');
+  return kept.length === 4 && kept[2].querySelector('.f-value').value === '不可丢失的内容' &&
+    validateEntryFormFields()?.includes('没有字段名');
+})()`));
+check('无效日历日期在提交前被拒绝', await evaluate(`!!validateFields([{ name: '日期', type: 'date', value: '2026-02-30' }])`));
+check('无效 SVG 不会悄悄保存旧图标', await evaluate(`(() => {
+  const code = document.querySelector('#icon-svg-code');
+  code.value = '<svg><script>alert(1)</script></svg>';
+  code.dispatchEvent(new Event('input', { bubbles: true }));
+  return state.svgIconValid === false;
+})()`));
+await evaluate(`document.querySelector('#modal-cancel').click()`);
+
 // ---------- 3. 通过弹窗新增条目 ----------
 async function addEntry(title, category, account, password, url, note, fav) {
   await evaluate(`document.querySelector('#add-btn').click()`);

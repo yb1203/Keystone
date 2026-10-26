@@ -161,7 +161,15 @@
             <div class="icon-picker">
               <div class="icon-preview" id="icon-preview">A</div>
               <button type="button" class="btn ghost sm" id="icon-upload-btn">上传图片</button>
+              <button type="button" class="btn ghost sm" id="icon-svg-btn" aria-expanded="false" aria-controls="icon-svg-panel">SVG 代码</button>
               <button type="button" class="btn ghost sm" id="icon-remove-btn">移除</button>
+            </div>
+            <div class="icon-svg-panel hidden" id="icon-svg-panel">
+              <textarea id="icon-svg-code" rows="4" spellcheck="false" placeholder="粘贴从 iconfont 复制的完整 SVG 代码"></textarea>
+              <div class="icon-svg-actions">
+                <a href="https://www.iconfont.cn/" target="_blank" rel="noopener noreferrer">打开 iconfont</a>
+                <button type="button" class="btn ghost sm" id="icon-svg-apply">应用 SVG</button>
+              </div>
             </div>
           </div>
           <label class="field span2">
@@ -193,7 +201,7 @@
         </div>
         <div class="modal-foot">
           <button type="button" class="btn ghost" id="modal-cancel">取消</button>
-          <button type="submit" class="btn primary">保存</button>
+          <button type="submit" class="btn primary" id="entry-save-btn">保存</button>
         </div>
       </form>
     </div>
@@ -450,7 +458,7 @@
   </div>
 
   <input type="file" id="import-file" accept=".json,application/json" class="hidden">
-  <input type="file" id="icon-file" accept="image/*" class="hidden">
+  <input type="file" id="icon-file" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden">
   <input type="file" id="attach-file" class="hidden" multiple>
 
   <div id="toast"></div>

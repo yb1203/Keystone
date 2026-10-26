@@ -77,6 +77,72 @@ function valueControlHTML(type, value) {
     ${masked ? `<button type="button" class="icon-btn sm f-gen" title="生成随机密码">${ICONS.dice}</button>` : ''}`;
 }
 
+function sanitizeIconSvg(markup) {
+  if (markup.length > 50000) throw new Error('SVG 代码不能超过 50KB');
+  if (/<!DOCTYPE|<!ENTITY/i.test(markup)) throw new Error('SVG 不支持文档类型或实体声明');
+  const doc = new DOMParser().parseFromString(markup.trim(), 'image/svg+xml');
+  const root = doc.documentElement;
+  if (root.localName !== 'svg' || root.namespaceURI !== 'http://www.w3.org/2000/svg' || doc.querySelector('parsererror')) {
+    throw new Error('请粘贴完整、有效的 SVG 代码');
+  }
+  const viewBox = root.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+  if (!viewBox || viewBox.length !== 4 || viewBox.some((n) => !Number.isFinite(n)) || viewBox[2] <= 0 || viewBox[3] <= 0) {
+    throw new Error('SVG 缺少有效的 viewBox');
+  }
+  const allowed = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon']);
+  const numeric = new Set(['x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'width', 'height', 'stroke-width', 'stroke-miterlimit', 'opacity', 'fill-opacity', 'stroke-opacity']);
+  const words = new Set(['stroke-linecap', 'stroke-linejoin', 'fill-rule', 'clip-rule']);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svg.setAttribute('viewBox', viewBox.join(' '));
+  svg.setAttribute('width', '96');
+  svg.setAttribute('height', '96');
+  let shapes = 0;
+  function copyChildren(source, target) {
+    for (const child of source.childNodes) {
+      if (child.nodeType === 3 && !child.textContent.trim()) continue;
+      if (child.nodeType !== 1 || child.namespaceURI !== 'http://www.w3.org/2000/svg' || !allowed.has(child.localName)) {
+        throw new Error('SVG 含有不支持的元素，请复制单个图标的 SVG 代码');
+      }
+      if (++shapes > 100) throw new Error('SVG 图形过于复杂');
+      const clean = document.createElementNS('http://www.w3.org/2000/svg', child.localName);
+      for (const attr of child.attributes) {
+        const name = attr.name;
+        const value = attr.value.trim();
+        if (name === 'd' && /^[MmLlHhVvCcSsQqTtAaZz0-9eE.,+\-\s]+$/.test(value)) clean.setAttribute(name, value);
+        else if (name === 'points' && /^[0-9eE.,+\-\s]+$/.test(value)) clean.setAttribute(name, value);
+        else if ((name === 'fill' || name === 'stroke') && /^(?:none|currentColor|#[0-9a-fA-F]{3,8}|rgba?\([0-9.,%\s]+\))$/.test(value)) clean.setAttribute(name, value);
+        else if (numeric.has(name) && /^[+\-]?(?:\d+\.?\d*|\.\d+)(?:e[+\-]?\d+)?%?$/i.test(value)) clean.setAttribute(name, value);
+        else if (words.has(name) && /^(?:round|square|butt|miter|bevel|evenodd|nonzero)$/.test(value)) clean.setAttribute(name, value);
+      }
+      target.append(clean);
+      copyChildren(child, clean);
+    }
+  }
+  copyChildren(root, svg);
+  if (!shapes) throw new Error('SVG 中没有可用的图形');
+  return new XMLSerializer().serializeToString(svg);
+}
+
+async function rasterizeIconSvg(markup) {
+  const safeSvg = sanitizeIconSvg(markup);
+  const url = URL.createObjectURL(new Blob([safeSvg], { type: 'image/svg+xml' }));
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('SVG 图标无法绘制'));
+      img.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 96;
+    canvas.getContext('2d').drawImage(img, 0, 0, 96, 96);
+    return canvas.toDataURL('image/png');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 // ---------------- 全局状态 ----------------
 const state = {
   setup: false,
@@ -98,6 +164,9 @@ const state = {
   selected: new Set(), // 已选条目 id
   expandedCards: new Set(), // 卡片已展开全部字段的条目 id
   pendingIcon: '', // 弹窗中当前选中的图标（emoji 或 dataURL）
+  iconRequestId: 0,
+  svgIconValid: true,
+  savingEntry: false,
   pendingAtts: [], // 新增条目时已上传、待保存后绑定到条目的附件
   idleTimer: null,
   lastIdleReset: 0,
@@ -720,12 +789,17 @@ function bindBackdropClose(backdropSel, closeFn) {
   });
 }
 function openModal(entry = null) {
+  state.iconRequestId++;
   state.editingId = entry?.id ?? null;
   const isEdit = !!entry;
   $('#modal-title').textContent = isEdit ? '编辑条目' : '新增条目';
   $('#m-title').value = entry?.title ?? '';
   $('#m-subtitle').value = entry?.subtitle ?? '';
   state.pendingIcon = entry?.icon || '';
+  state.svgIconValid = true;
+  $('#icon-svg-code').value = '';
+  $('#icon-svg-panel').classList.add('hidden');
+  $('#icon-svg-btn').setAttribute('aria-expanded', 'false');
   renderIconPicker();
   populateCategorySelect(entry?.category ?? '');
   renderFields(entry?.fields || [
@@ -795,8 +869,22 @@ function collectFields() {
         pinned: row.querySelector('.f-pin').classList.contains('active') ? '1' : '0',
         copyable: row.querySelector('.f-copyable').classList.contains('active') ? '1' : '0',
       };
-    })
-    .filter((f) => f.name || f.type === 'divider'); // 分割线允许空名
+    });
+}
+
+function validateEntryFormFields() {
+  const rows = $$('#fields-list .field-block, #fields-list .divider-row');
+  if (rows.length > 30) return '最多添加 30 个字段';
+  for (const row of rows) {
+    if (row.classList.contains('divider-row')) continue;
+    const name = row.querySelector('.f-name').value.trim();
+    const valueInput = row.querySelector('.f-value');
+    const value = valueInput.type === 'checkbox' ? (valueInput.checked ? '是' : '') : valueInput.value;
+    if (!name && value) return '有字段填写了内容但没有字段名，请补全字段名';
+    if (name && name.length > 60) return `「${name}」字段名不能超过 60 字`;
+    if (value.length > 2000) return `「${name}」内容不能超过 2000 字`;
+  }
+  return null;
 }
 
 /** 按字段类型校验值（与服务端一致），返回错误信息或 null */
@@ -804,7 +892,11 @@ function validateFields(fields) {
   for (const f of fields) {
     if (f.value === '') continue;
     if (f.type === 'number' && !/^[\d\s\-+()]+$/.test(f.value)) return `「${f.name}」不是有效的数字（仅限数字、空格、- + ( )）`;
-    if (f.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(f.value)) return `「${f.name}」日期格式应为 YYYY-MM-DD`;
+    if (f.type === 'date') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(f.value)) return `「${f.name}」日期格式应为 YYYY-MM-DD`;
+      const date = new Date(`${f.value}T00:00:00Z`);
+      if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== f.value) return `「${f.name}」不是有效日期`;
+    }
     if (f.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.value)) return `「${f.name}」不是有效的邮箱地址`;
     if (f.type === 'boolean' && f.value !== '是' && f.value !== '否') return `「${f.name}」布尔值只能为 是 或 否`;
     if (f.type === 'url' && !/^https?:\/\//i.test(f.value)) return `「${f.name}」网址应以 http:// 或 https:// 开头`;
@@ -814,6 +906,7 @@ function validateFields(fields) {
 
 function bindFieldsEvents() {
   $('#fields-add-btn').addEventListener('click', () => {
+    if ($$('#fields-list .field-block, #fields-list .divider-row').length >= 30) return toast('最多添加 30 个字段', 'error');
     const rows = collectFields();
     rows.push({ name: '', type: 'text', value: '' });
     renderFields(rows);
@@ -823,6 +916,7 @@ function bindFieldsEvents() {
 
   // 快捷插入分割线（用于把字段分成几组，如多个 QQ 号）
   $('#fields-divider-btn').addEventListener('click', () => {
+    if ($$('#fields-list .field-block, #fields-list .divider-row').length >= 30) return toast('最多添加 30 个字段', 'error');
     const rows = collectFields();
     rows.push({ name: '', type: 'divider', value: '' });
     renderFields(rows);
@@ -943,18 +1037,54 @@ function bindFieldsEvents() {
     });
   }
   $('#icon-upload-btn').addEventListener('click', () => $('#icon-file').click());
+  $('#icon-svg-btn').addEventListener('click', () => {
+    const panel = $('#icon-svg-panel');
+    const open = panel.classList.toggle('hidden') === false;
+    $('#icon-svg-btn').setAttribute('aria-expanded', String(open));
+    if (open) $('#icon-svg-code').focus();
+  });
+  async function applySvgCode() {
+    if ($('#modal').classList.contains('hidden')) return;
+    const markup = $('#icon-svg-code').value.trim();
+    if (!markup) return toast('请先粘贴 SVG 代码', 'error');
+    state.svgIconValid = false;
+    const requestId = state.iconRequestId;
+    try {
+      const icon = await rasterizeIconSvg(markup);
+      if (requestId !== state.iconRequestId || $('#modal').classList.contains('hidden')) return;
+      state.pendingIcon = icon;
+      state.svgIconValid = true;
+      renderIconPicker();
+      toast('SVG 图标已应用', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+  $('#icon-svg-code').addEventListener('input', () => {
+    state.iconRequestId++;
+    state.svgIconValid = !$('#icon-svg-code').value.trim();
+  });
+  $('#icon-svg-apply').addEventListener('click', applySvgCode);
   $('#icon-remove-btn').addEventListener('click', () => {
+    state.iconRequestId++;
     state.pendingIcon = '';
+    state.svgIconValid = true;
+    $('#icon-svg-code').value = '';
     renderIconPicker();
   });
   $('#icon-file').addEventListener('change', async (ev) => {
     const file = ev.target.files[0];
     ev.target.value = '';
     if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) return toast('请选择 PNG、JPEG、WebP 或 GIF 图片', 'error');
     if (file.size > 500 * 1024) return toast('图标图片不能超过 500KB', 'error');
+    const requestId = ++state.iconRequestId;
     const dataUrl = await readIconImage(file);
     if (!dataUrl) return toast('无法读取该图片', 'error');
+    if (requestId !== state.iconRequestId || $('#modal').classList.contains('hidden')) return;
     state.pendingIcon = dataUrl;
+    state.svgIconValid = true;
+    $('#icon-svg-code').value = '';
     renderIconPicker();
     toast('图标已选择', 'success');
   });
@@ -1054,6 +1184,7 @@ async function uploadPendingAttachment(file) {
 }
 
 function closeModal() {
+  state.iconRequestId++;
   $('#modal').classList.add('hidden');
   document.body.classList.remove('modal-open');
   state.editingId = null;
@@ -1063,6 +1194,8 @@ function closeModal() {
   }
   state.pendingAtts = [];
   state.pendingIcon = '';
+  state.svgIconValid = true;
+  $('#icon-svg-code').value = '';
 }
 
 /** 图标预览：上传的图片 → 显示图片；否则显示文字占位提示 */
@@ -1103,6 +1236,9 @@ function currentCategory() {
 }
 
 async function saveEntry() {
+  if (!state.svgIconValid) { toast('请先应用有效的 SVG 图标代码，或清空输入框', 'error'); return; }
+  const formErr = validateEntryFormFields();
+  if (formErr) { toast(formErr, 'error'); return; }
   const fields = collectFields();
   const fieldErr = validateFields(fields);
   if (fieldErr) { toast(fieldErr, 'error'); return; }
@@ -1289,7 +1425,13 @@ function bindEvents() {
   bindBackdropClose('#modal', closeModal); // 点击遮罩关闭（防拖选误关）
   $('#entry-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
-    saveEntry().catch(() => {});
+    if (state.savingEntry) return;
+    state.savingEntry = true;
+    $('#entry-save-btn').disabled = true;
+    saveEntry().catch(() => {}).finally(() => {
+      state.savingEntry = false;
+      $('#entry-save-btn').disabled = false;
+    });
   });
   // 没有分类时：跳转到设置里的分类管理
   $('#m-cat-empty-btn').addEventListener('click', () => {
